@@ -6,6 +6,49 @@ use std::path::Path;
 /// Seeking is cheaper than decoding forward beyond this distance.
 const SEEK_THRESHOLD: Time = Time::from_flicks(2 * Time::FLICKS_PER_SECOND);
 
+/// Before the first frame of a stream that starts later than the file (audio
+/// lead-in), black is shown; small encoder offsets below this show the first frame.
+const LEAD_IN_TOLERANCE: Time = Time::from_flicks(Time::FLICKS_PER_SECOND / 10);
+
+/// How decoded frames must be turned and flipped to display upright.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Orientation {
+    /// Clockwise quarter turns, applied before the flips.
+    pub quarter_turns: u32,
+    pub hflip: bool,
+    pub vflip: bool,
+}
+
+impl Orientation {
+    /// Interprets a 3×3 display matrix the same way FFmpeg's autorotate does.
+    pub(crate) fn from_display_matrix(m: &[i32; 9]) -> Self {
+        // SAFETY: `m` points to nine valid i32 values.
+        let ccw = unsafe { ffmpeg_next::ffi::av_display_rotation_get(m.as_ptr()) };
+        let mut o = Self {
+            quarter_turns: quarter_turns_from_angle(ccw),
+            ..Self::default()
+        };
+        match o.quarter_turns {
+            1 if m[3] > 0 => {
+                o.quarter_turns = 3;
+                o.vflip = true;
+            }
+            2 => {
+                o.quarter_turns = 0;
+                o.hflip = m[0] < 0;
+                o.vflip = m[4] < 0;
+            }
+            3 if m[3] < 0 => {
+                o.quarter_turns = 1;
+                o.vflip = true;
+            }
+            0 => o.vflip = m[4] < 0,
+            _ => {}
+        }
+        o
+    }
+}
+
 /// Decodes frames from the best video stream of a file, optimised for
 /// monotonically increasing requests (playback/export) but able to seek.
 pub struct VideoReader {
@@ -19,7 +62,7 @@ pub struct VideoReader {
     pending: Option<(Time, frame::Video)>,
     eof: bool,
     started: bool,
-    quarter_turns: u32,
+    orientation: Orientation,
 }
 
 impl VideoReader {
@@ -37,7 +80,7 @@ impl VideoReader {
         let stream_index = stream.index();
         let tb = stream.time_base();
         let start_pts = reference_start(&input, &stream);
-        let quarter_turns = display_quarter_turns(&stream);
+        let orientation = display_orientation(&stream);
         let mut ctx = codec::context::Context::from_parameters(stream.parameters())?;
         ctx.set_threading(threading::Config::kind(threading::Type::Frame));
         let decoder = ctx.decoder().video()?;
@@ -52,7 +95,7 @@ impl VideoReader {
             pending: None,
             eof: false,
             started: false,
-            quarter_turns,
+            orientation,
         })
     }
 
@@ -64,9 +107,9 @@ impl VideoReader {
         self.decoder.height()
     }
 
-    /// Clockwise quarter turns needed to show the frames upright (display matrix).
-    pub fn quarter_turns(&self) -> u32 {
-        self.quarter_turns
+    /// Turns/flips needed to show the frames upright (display matrix).
+    pub fn orientation(&self) -> Orientation {
+        self.orientation
     }
 
     fn pts_to_time(&self, pts: i64) -> Time {
@@ -143,7 +186,11 @@ impl VideoReader {
                 _ => break,
             }
         }
-        Ok(self.current.as_ref().map(|(_, f)| f))
+        Ok(self
+            .current
+            .as_ref()
+            .filter(|(ct, _)| *ct <= t + LEAD_IN_TOLERANCE)
+            .map(|(_, f)| f))
     }
 }
 
@@ -174,8 +221,8 @@ pub(crate) fn reference_start(
     }
 }
 
-/// Clockwise quarter turns from the stream's display matrix (phone footage).
-pub(crate) fn display_quarter_turns(stream: &format::stream::Stream) -> u32 {
+/// Orientation from the stream's display matrix (phone footage).
+pub(crate) fn display_orientation(stream: &format::stream::Stream) -> Orientation {
     use ffmpeg_next::ffi;
     // SAFETY: the stream and its codec parameters are valid while `stream` is borrowed;
     // the side data is only read when FFmpeg reports a full 3×3 matrix.
@@ -187,9 +234,10 @@ pub(crate) fn display_quarter_turns(stream: &format::stream::Stream) -> u32 {
             ffi::AVPacketSideDataType::AV_PKT_DATA_DISPLAYMATRIX,
         );
         if sd.is_null() || (*sd).size < 9 * std::mem::size_of::<i32>() {
-            return 0;
+            return Orientation::default();
         }
-        quarter_turns_from_angle(ffi::av_display_rotation_get((*sd).data.cast::<i32>()))
+        let m = std::ptr::read_unaligned((*sd).data.cast::<[i32; 9]>());
+        Orientation::from_display_matrix(&m)
     }
 }
 
@@ -201,8 +249,9 @@ pub(crate) fn quarter_turns_from_angle(ccw_degrees: f64) -> u32 {
     ((-ccw_degrees / 90.0).round() as i64).rem_euclid(4) as u32
 }
 
-/// Rotates a picture clockwise by `turns` quarter turns (dimensions must be even for YUV).
-fn rotate(src: &frame::Video, turns: u32) -> frame::Video {
+/// Applies `o` to a picture (dimensions must be even for YUV).
+fn orient(src: &frame::Video, o: Orientation) -> frame::Video {
+    let turns = o.quarter_turns % 4;
     let (w, h) = (src.width(), src.height());
     let (dw, dh) = if turns % 2 == 1 { (h, w) } else { (w, h) };
     let format = src.format();
@@ -211,17 +260,24 @@ fn rotate(src: &frame::Video, turns: u32) -> frame::Video {
     for plane in 0..src.planes() {
         let (sx, sy) = plane_scale(format, plane);
         let (pw, ph) = ((w / sx) as usize, (h / sy) as usize);
+        let (dpw, dph) = if turns % 2 == 1 { (ph, pw) } else { (pw, ph) };
         let (ss, ds) = (src.stride(plane), dst.stride(plane));
         let s = src.data(plane);
         let d = dst.data_mut(plane);
         for y in 0..ph {
             for x in 0..pw {
-                let (dx, dy) = match turns % 4 {
+                let (mut dx, mut dy) = match turns {
                     1 => (ph - 1 - y, x),
                     2 => (pw - 1 - x, ph - 1 - y),
                     3 => (y, pw - 1 - x),
                     _ => (x, y),
                 };
+                if o.hflip {
+                    dx = dpw - 1 - dx;
+                }
+                if o.vflip {
+                    dy = dph - 1 - dy;
+                }
                 let si = y * ss + x * bpp;
                 let di = dy * ds + dx * bpp;
                 d[di..di + bpp].copy_from_slice(&s[si..si + bpp]);
@@ -277,13 +333,13 @@ impl Fitter {
         canvas
     }
 
-    /// Renders `src`, rotated clockwise by `turns` quarter turns, letterboxed into a fresh canvas.
+    /// Renders `src`, oriented by `o`, letterboxed into a fresh canvas.
     pub(crate) fn fit(
         &mut self,
         src: &frame::Video,
-        turns: u32,
+        o: Orientation,
     ) -> Result<frame::Video, MediaError> {
-        let turns = turns % 4;
+        let turns = o.quarter_turns % 4;
         let sideways = turns % 2 == 1;
         let (sw, sh) = if sideways {
             (src.height(), src.width())
@@ -309,7 +365,7 @@ impl Fitter {
         let mut canvas = if full { None } else { Some(self.black()) };
         let (_, ctx, scaled) = self.scaler.as_mut().expect("scaler initialised above");
         ctx.run(src, scaled)?;
-        let rotated = (turns != 0).then(|| rotate(scaled, turns));
+        let rotated = (o != Orientation::default()).then(|| orient(scaled, o));
         let picture = rotated.as_ref().unwrap_or(scaled);
         match canvas.as_mut() {
             None => Ok(picture.clone()),
@@ -398,6 +454,58 @@ mod tests {
         f
     }
 
+    fn turns(quarter_turns: u32) -> Orientation {
+        Orientation {
+            quarter_turns,
+            ..Orientation::default()
+        }
+    }
+
+    fn flips(hflip: bool, vflip: bool) -> Orientation {
+        Orientation {
+            hflip,
+            vflip,
+            ..Orientation::default()
+        }
+    }
+
+    #[test]
+    fn display_matrices_follow_ffmpeg_autorotate() {
+        const ONE: i32 = 1 << 16;
+        let m = |a: i32, b: i32, c: i32, d: i32| [a, b, 0, c, d, 0, 0, 0, 1 << 30];
+        let o = |quarter_turns, hflip, vflip| Orientation {
+            quarter_turns,
+            hflip,
+            vflip,
+        };
+        let cases = [
+            (m(ONE, 0, 0, ONE), o(0, false, false)),
+            (m(0, ONE, -ONE, 0), o(1, false, false)),
+            (m(0, -ONE, ONE, 0), o(3, false, false)),
+            (m(-ONE, 0, 0, -ONE), o(0, true, true)),
+            (m(-ONE, 0, 0, ONE), o(0, true, false)),
+            (m(ONE, 0, 0, -ONE), o(0, false, true)),
+            (m(0, ONE, ONE, 0), o(3, false, true)),
+            (m(0, -ONE, -ONE, 0), o(1, false, true)),
+        ];
+        for (matrix, expected) in cases {
+            assert_eq!(
+                Orientation::from_display_matrix(&matrix),
+                expected,
+                "{matrix:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn orient_flips_after_turning() {
+        let src = rgba(3, 2);
+        let h = orient(&src, flips(true, false));
+        assert_eq!([red(&h, 0, 0), red(&h, 2, 1)], [3, 4]);
+        let v = orient(&src, flips(false, true));
+        assert_eq!([red(&v, 0, 0), red(&v, 2, 1)], [4, 3]);
+    }
+
     fn red(f: &frame::Video, x: usize, y: usize) -> u8 {
         f.data(0)[y * f.stride(0) + x * 4]
     }
@@ -417,13 +525,13 @@ mod tests {
         // 3×2 source:  1 2 3
         //              4 5 6
         let src = rgba(3, 2);
-        let r1 = rotate(&src, 1);
+        let r1 = orient(&src, turns(1));
         assert_eq!((r1.width(), r1.height()), (2, 3));
         assert_eq!([red(&r1, 0, 0), red(&r1, 1, 0), red(&r1, 0, 2)], [4, 1, 6]);
-        let r2 = rotate(&src, 2);
+        let r2 = orient(&src, turns(2));
         assert_eq!((r2.width(), r2.height()), (3, 2));
         assert_eq!([red(&r2, 0, 0), red(&r2, 2, 1)], [6, 1]);
-        let r3 = rotate(&src, 3);
+        let r3 = orient(&src, turns(3));
         assert_eq!((r3.width(), r3.height()), (2, 3));
         assert_eq!([red(&r3, 0, 0), red(&r3, 1, 0), red(&r3, 0, 2)], [3, 6, 1]);
 
@@ -431,7 +539,7 @@ mod tests {
         yuv.data_mut(0).fill(50);
         yuv.data_mut(1).fill(60);
         yuv.data_mut(2).fill(70);
-        let ry = rotate(&yuv, 1);
+        let ry = orient(&yuv, turns(1));
         assert_eq!((ry.width(), ry.height()), (2, 4));
         assert_eq!((ry.data(0)[0], ry.data(1)[0], ry.data(2)[0]), (50, 60, 70));
     }
@@ -440,12 +548,12 @@ mod tests {
     fn fit_applies_rotation_before_letterboxing() {
         let mut fitter = Fitter::new(format::Pixel::RGBA, 8, 8);
         // A wide 4×2 picture turned sideways becomes tall: pillarboxed at x = 2..6.
-        let out = fitter.fit(&rgba(4, 2), 1).unwrap();
+        let out = fitter.fit(&rgba(4, 2), turns(1)).unwrap();
         assert_eq!((out.width(), out.height()), (8, 8));
         assert_eq!(red(&out, 0, 4), 0);
         assert_ne!(red(&out, 4, 4), 0);
         // Unrotated, the same picture is letterboxed instead.
-        let out = fitter.fit(&rgba(4, 2), 0).unwrap();
+        let out = fitter.fit(&rgba(4, 2), turns(0)).unwrap();
         assert_eq!(red(&out, 4, 0), 0);
         assert_ne!(red(&out, 4, 4), 0);
     }
@@ -457,7 +565,7 @@ mod tests {
         let path = dir.join("plain.mp4");
         crate::synthetic::write_test_video(&path, (32, 18), 10, 5, true).unwrap();
         let reader = VideoReader::open(&path, false).unwrap();
-        assert_eq!(reader.quarter_turns(), 0);
+        assert_eq!(reader.orientation(), Orientation::default());
         let input = format::input(&path).unwrap();
         for stream in input.streams() {
             assert!(reference_start(&input, &stream) <= stream.start_time().max(0));

@@ -353,9 +353,9 @@ fn render(
                         asset.kind() == MediaKind::Image,
                     )?),
                 };
-                let turns = reader.quarter_turns();
+                let orientation = reader.orientation();
                 match reader.frame_at(clip.source_time(t))? {
-                    Some(src) => fitter.fit(src, turns)?,
+                    Some(src) => fitter.fit(src, orientation)?,
                     None => fitter.black(),
                 }
             }
