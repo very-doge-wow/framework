@@ -1,4 +1,4 @@
-use framework_core::{ClipId, ExportProfile, MediaAsset, MediaId, Project, Time};
+use framework_core::{ClipId, ExportProfile, MediaAsset, MediaId, Project, SaveMode, Time};
 use std::path::{Path, PathBuf};
 
 pub const MIN_ZOOM: f32 = 2.0;
@@ -148,12 +148,18 @@ impl EditorState {
             .unwrap_or(3600.0)
     }
 
-    pub fn save_to(&mut self, path: &Path) -> bool {
-        match self.project.save(path) {
+    /// Saves to `path`; [`SaveMode::Collect`] embeds all media into the file.
+    pub fn save_to(&mut self, path: &Path, mode: SaveMode) -> bool {
+        match self.project.save_as(path, mode) {
             Ok(()) => {
                 self.project_path = Some(path.to_owned());
                 self.dirty = false;
-                self.status = format!("Saved {}", path.display());
+                self.status = match mode {
+                    SaveMode::Reference => format!("Saved {}", path.display()),
+                    SaveMode::Collect => {
+                        format!("Saved {} with embedded media", path.display())
+                    }
+                };
                 true
             }
             Err(e) => {
@@ -208,7 +214,7 @@ mod tests {
         assert_eq!(s.project.media[0].kind(), MediaKind::Video);
 
         let path = tmp("p.framework.json");
-        assert!(s.save_to(&path));
+        assert!(s.save_to(&path, SaveMode::Reference));
         assert!(!s.dirty);
         let mut other = EditorState::default();
         assert!(other.open(&path));
@@ -216,7 +222,7 @@ mod tests {
         assert!(other.title().starts_with("p.framework.json"));
         assert!(!other.open(&tmp("nope.json")));
         assert!(other.status.starts_with("Open failed"));
-        assert!(!other.save_to(&tmp("no/such/dir/x.json")));
+        assert!(!other.save_to(&tmp("no/such/dir/x.fwk"), SaveMode::Reference));
     }
 
     #[test]

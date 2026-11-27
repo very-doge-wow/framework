@@ -2,7 +2,7 @@ use crate::state::EditorState;
 use crate::theme;
 use crate::worker::{ExportJob, ExportState, PreviewWorker};
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle, Vec2};
-use framework_core::{MediaKind, Time, TrackKind};
+use framework_core::{MediaKind, PROJECT_EXTENSION, SaveMode, Time, TrackKind};
 use std::path::PathBuf;
 
 const TRACK_HEIGHT: f32 = 48.0;
@@ -40,6 +40,8 @@ pub enum UiAction {
     Open,
     Save,
     SaveAs,
+    /// Embeds all media into a new `.fwk` file.
+    CollectAndSave,
     Import,
     ChooseExportPath,
     StartExport,
@@ -191,20 +193,23 @@ impl FrameworkApp {
                 self.touch();
             }
             UiAction::Open => {
-                if let Some(path) = self.pick_file(&["json"]) {
+                if let Some(path) = self.pick_file(&[PROJECT_EXTENSION, "json"]) {
                     self.state.open(&path);
                     self.touch();
                 }
             }
             UiAction::Save => match self.state.project_path.clone() {
-                Some(path) => {
-                    self.state.save_to(&path);
-                }
+                Some(path) => self.save_project(&path, SaveMode::Reference),
                 None => self.perform(UiAction::SaveAs, ctx),
             },
             UiAction::SaveAs => {
-                if let Some(path) = self.save_file("project.framework.json") {
-                    self.state.save_to(&path);
+                if let Some(path) = self.save_file("project") {
+                    self.save_project(&path, SaveMode::Reference);
+                }
+            }
+            UiAction::CollectAndSave => {
+                if let Some(path) = self.save_file("project-collected") {
+                    self.save_project(&path, SaveMode::Collect);
                 }
             }
             UiAction::Import => {
@@ -259,10 +264,27 @@ impl FrameworkApp {
             .flatten()
     }
 
-    fn save_file(&self, default: &str) -> Option<PathBuf> {
+    fn save_file(&self, stem: &str) -> Option<PathBuf> {
         self.use_dialogs
-            .then(|| rfd::FileDialog::new().set_file_name(default).save_file())
+            .then(|| {
+                rfd::FileDialog::new()
+                    .add_filter("Framework project", &[PROJECT_EXTENSION])
+                    .set_file_name(format!("{stem}.{PROJECT_EXTENSION}"))
+                    .save_file()
+            })
             .flatten()
+            .map(|p| with_project_extension(&p))
+    }
+
+    /// Saves the project; the preview first closes its media files because
+    /// embedded media may live in the file being replaced.
+    pub fn save_project(&mut self, path: &std::path::Path, mode: SaveMode) {
+        if let Some(worker) = &self.preview {
+            worker.release_media();
+        }
+        self.state.save_to(path, mode);
+        self.preview_requested = None;
+        self.project_revision += 1;
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
@@ -296,6 +318,7 @@ impl FrameworkApp {
                         ("Open…", UiAction::Open),
                         ("Save", UiAction::Save),
                         ("Save as…", UiAction::SaveAs),
+                        ("Collect and save…", UiAction::CollectAndSave),
                         ("Import media…", UiAction::Import),
                     ] {
                         if ui.button(label).clicked() {
@@ -662,6 +685,17 @@ pub fn fit_aspect(avail: Vec2, content: Vec2) -> Vec2 {
     content * scale
 }
 
+/// Appends `.fwk` unless the path already ends in it.
+pub fn with_project_extension(path: &std::path::Path) -> PathBuf {
+    if path.extension().is_some_and(|e| e == PROJECT_EXTENSION) {
+        path.to_owned()
+    } else {
+        let mut p = path.as_os_str().to_owned();
+        p.push(format!(".{PROJECT_EXTENSION}"));
+        PathBuf::from(p)
+    }
+}
+
 impl eframe::App for FrameworkApp {
     // `logic` also runs while the window is minimised, unlike `ui`.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -875,7 +909,7 @@ mod tests {
             .unwrap()
             .to_owned();
         let path = dir.join("saved.framework.json");
-        assert!(app.state.save_to(&path));
+        assert!(app.state.save_to(&path, SaveMode::Reference));
         frame(&mut app, &ctx, vec![]);
         for action in [
             UiAction::Save,

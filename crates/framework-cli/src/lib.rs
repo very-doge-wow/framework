@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use framework_core::{ExportProfile, MediaAsset, Project, Rational};
+use framework_core::{ExportProfile, MediaAsset, Project, Rational, SaveMode};
 use std::ffi::OsStr;
 use std::io::Write;
 use std::path::PathBuf;
@@ -34,6 +34,8 @@ pub enum Command {
     },
     /// Summarise a project file.
     Info { project: PathBuf },
+    /// Copy a project and embed all of its media into the new `.fwk` file.
+    Collect { project: PathBuf, output: PathBuf },
     /// Render a project to an MP4 file.
     Export {
         project: PathBuf,
@@ -145,6 +147,11 @@ pub fn run(cli: Cli, out: &mut impl Write) -> Result<()> {
                 )?;
             }
         }
+        Command::Collect { project, output } => {
+            let mut project = Project::load(&project)?;
+            project.save_as(&output, SaveMode::Collect)?;
+            writeln!(out, "wrote {} with embedded media", output.display())?;
+        }
         Command::Export {
             project,
             output,
@@ -181,7 +188,8 @@ fn self_test(dir: &std::path::Path, out: &mut impl Write) -> Result<()> {
     synthetic::write_test_video(&video, (320, 180), 30, 30, true)?;
     synthetic::write_test_png(&image, (64, 64), [200, 40, 40])?;
     synthetic::write_test_wav(&audio, 44_100, 1, 1.0, 8000)?;
-    let project = dir.join("self-test.framework.json");
+    let project = dir.join("self-test.fwk");
+    let collected = dir.join("self-test-collected.fwk");
     let output = dir.join("self-test-export.mp4");
     run(
         Cli::parse_from([
@@ -206,11 +214,41 @@ fn self_test(dir: &std::path::Path, out: &mut impl Write) -> Result<()> {
         ]),
         out,
     )?;
-    let info = framework_media::probe(&output)?;
+    check_self_test_export(&output)?;
+    // Embedded media must render without the original files.
+    let cli = |args: &[&OsStr]| Cli::parse_from([OsStr::new("framework-cli")].iter().chain(args));
+    run(
+        cli(&[
+            OsStr::new("collect"),
+            project.as_os_str(),
+            collected.as_os_str(),
+        ]),
+        out,
+    )?;
+    for file in [&video, &image, &audio] {
+        std::fs::remove_file(file)?;
+    }
+    run(
+        cli(&[
+            OsStr::new("export"),
+            collected.as_os_str(),
+            OsStr::new("-o"),
+            output.as_os_str(),
+            OsStr::new("-p"),
+            OsStr::new("draft-540p"),
+        ]),
+        out,
+    )?;
+    let duration = check_self_test_export(&output)?;
+    writeln!(out, "self-test OK ({duration:.2} s)")?;
+    Ok(())
+}
+
+fn check_self_test_export(output: &std::path::Path) -> Result<f64> {
+    let info = framework_media::probe(output)?;
     let duration = info.duration.unwrap_or_default().as_seconds();
     if info.video.is_none() || info.audio.is_none() || !(5.5..6.5).contains(&duration) {
         bail!("self-test export is invalid: {info:?}");
     }
-    writeln!(out, "self-test OK ({duration:.2} s)")?;
-    Ok(())
+    Ok(duration)
 }
