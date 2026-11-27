@@ -24,6 +24,9 @@ pub struct AudioReader {
     buffer_start: Option<i64>,
     eof: bool,
     resampler_drained: bool,
+    /// Earliest source sample the buffer state is valid for; requests between
+    /// this and `buffer_start` fall into the stream's silent lead-in.
+    covered_from: i64,
 }
 
 impl AudioReader {
@@ -55,6 +58,7 @@ impl AudioReader {
             buffer_start: None,
             eof: false,
             resampler_drained: false,
+            covered_from: 0,
         })
     }
 
@@ -73,6 +77,7 @@ impl AudioReader {
         self.buffer_start = None;
         self.eof = false;
         self.resampler_drained = false;
+        self.covered_from = sample;
         Ok(())
     }
 
@@ -169,7 +174,10 @@ impl AudioReader {
     pub fn mix_into(&mut self, start: i64, out: &mut [f32], gain: f32) -> Result<(), MediaError> {
         let frames = (out.len() / OUTPUT_CHANNELS) as i64;
         let needs_seek = match self.buffer_start {
-            Some(bs) => start < bs || start > bs + self.buffered_frames() + i64::from(self.rate),
+            Some(bs) => {
+                start < self.covered_from.min(bs)
+                    || start > bs + self.buffered_frames() + i64::from(self.rate)
+            }
             None => start > 0,
         };
         if needs_seek {
@@ -190,6 +198,7 @@ impl AudioReader {
             let drop = ((start - bs) as usize * OUTPUT_CHANNELS).min(self.buffer.len());
             self.buffer.drain(..drop);
             self.buffer_start = Some(bs + (drop / OUTPUT_CHANNELS) as i64);
+            self.covered_from = bs + (drop / OUTPUT_CHANNELS) as i64;
         }
         let bs = self.buffer_start.unwrap_or(start);
         let lead = ((bs - start).max(0) as usize * OUTPUT_CHANNELS).min(out.len());
