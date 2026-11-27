@@ -1,0 +1,51 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", "helpers:pinGitHubActionDigests"],
+  "rangeStrategy": "pin",
+  "semanticCommits": "enabled",
+  "semanticCommitType": "build",
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 6am on monday"]
+  },
+  "packageRules": [
+    {
+      "matchManagers": ["github-actions"],
+      "semanticCommitType": "ci"
+    },
+    {
+      "description": "Release tooling is not shipped; group it to keep noise down.",
+      "matchManagers": ["npm"],
+      "groupName": "release tooling"
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Rust toolchain",
+      "managerFilePatterns": ["/^rust-toolchain\\.toml$/"],
+      "matchStrings": ["channel = \"(?<currentValue>\\d+\\.\\d+\\.\\d+)\""],
+      "depNameTemplate": "rust",
+      "packageNameTemplate": "rust-lang/rust",
+      "datasourceTemplate": "github-releases"
+    },
+    {
+      "customType": "regex",
+      "description": "vcpkg baseline (pins FFmpeg, x264 and the vcpkg tool)",
+      "managerFilePatterns": ["/^vcpkg\\.json$/"],
+      "matchStrings": ["\"builtin-baseline\": \"(?<currentDigest>[0-9a-f]{40})\""],
+      "depNameTemplate": "vcpkg",
+      "packageNameTemplate": "https://github.com/microsoft/vcpkg",
+      "currentValueTemplate": "master",
+      "datasourceTemplate": "git-refs"
+    },
+    {
+      "customType": "regex",
+      "description": "Versions pinned in workflows and docs via `# renovate:` comments",
+      "managerFilePatterns": ["/^\\.github/workflows/.+\\.ya?ml$/", "/^package\\.json$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+\\S+:\\s*\"?(?<currentValue>[^\"\\s]+)\"?"
+      ]
+    }
+  ]
+}
