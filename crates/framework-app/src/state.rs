@@ -220,8 +220,19 @@ impl EditorState {
         match Project::load(path) {
             Ok(project) => {
                 *self = Self::new(project);
-                self.project_path = Some(path.to_owned());
-                self.status = format!("Opened {}", path.display());
+                if path
+                    .extension()
+                    .is_some_and(|e| e == framework_core::PROJECT_EXTENSION)
+                {
+                    self.project_path = Some(path.to_owned());
+                    self.status = format!("Opened {}", path.display());
+                } else {
+                    // Never overwrite a legacy JSON project with a `.fwk` container.
+                    self.status = format!(
+                        "Opened legacy project {}; saving creates a new .fwk file",
+                        path.display()
+                    );
+                }
                 true
             }
             Err(e) => {
@@ -267,6 +278,11 @@ mod tests {
         assert!(other.open(&path));
         assert_eq!(other.project, s.project);
         assert!(other.title().starts_with("p.fwk"));
+        let legacy = tmp("legacy.json");
+        std::fs::write(&legacy, s.project.to_json().unwrap()).unwrap();
+        assert!(other.open(&legacy));
+        assert_eq!(other.project_path, None);
+        assert!(other.status.contains("legacy"));
         assert!(!other.open(&tmp("nope.json")));
         assert!(other.status.starts_with("Open failed"));
         assert!(!other.save_to(&tmp("no/such/dir/x.fwk"), SaveMode::Reference));
