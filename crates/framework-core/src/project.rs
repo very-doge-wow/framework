@@ -384,7 +384,9 @@ impl Project {
 
     pub fn save(&self, path: impl AsRef<Path>) -> Result<(), ProjectError> {
         let path = path.as_ref();
-        let tmp = path.with_extension("tmp");
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(".tmp");
+        let tmp = std::path::PathBuf::from(tmp);
         fs::write(&tmp, self.to_json()?)?;
         fs::rename(tmp, path)?;
         Ok(())
