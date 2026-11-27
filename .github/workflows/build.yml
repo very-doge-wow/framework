@@ -108,7 +108,11 @@ jobs:
         run: scripts/set-version.sh "${{ inputs.version }}"
 
       - name: Library search path for tests
-        run: scripts/ffmpeg-env.sh >> "$GITHUB_ENV"
+        run: |
+          scripts/ffmpeg-env.sh | grep -v '^PATH=' >> "$GITHUB_ENV"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            cygpath -w "$FFMPEG_DIR/bin" >> "$GITHUB_PATH"
+          fi
 
       - name: Format
         if: matrix.coverage
