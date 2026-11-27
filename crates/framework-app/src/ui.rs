@@ -119,15 +119,19 @@ impl FrameworkApp {
         self.export_dialog(&ctx);
         self.unsaved_dialog(&ctx);
         self.handle_shortcuts(&ctx);
-        if ctx.input(|i| i.viewport().close_requested()) && self.state.dirty {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.pending = Some(UiAction::Quit);
-        }
         let actions = std::mem::take(&mut self.actions);
         for action in actions {
             self.perform(action, &ctx);
         }
         self.request_preview();
+    }
+
+    /// Turns a window close request with unsaved edits into the unsaved-changes prompt.
+    pub fn handle_close_request(&mut self, ctx: &egui::Context) {
+        if ctx.input(|i| i.viewport().close_requested()) && self.state.dirty {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.pending = Some(UiAction::Quit);
+        }
     }
 
     fn request_preview(&mut self) {
@@ -652,6 +656,11 @@ fn planned_list(ui: &mut egui::Ui, items: &[(&str, &str)]) {
 }
 
 impl eframe::App for FrameworkApp {
+    // `logic` also runs while the window is minimised, unlike `ui`.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.handle_close_request(ctx);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         FrameworkApp::ui(self, ui);
         ui.ctx()
@@ -955,7 +964,10 @@ mod tests {
                 ..Default::default()
             },
         );
-        let mut out = ctx.run_ui(raw, |ui| app.ui(ui));
+        let mut out = ctx.run_ui(raw, |ui| {
+            app.ui(ui);
+            app.handle_close_request(ui.ctx());
+        });
         out.textures_delta.clear();
         assert_eq!(app.pending, Some(UiAction::Quit));
         app.perform(UiAction::DiscardChanges, &ctx);
