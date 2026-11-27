@@ -246,7 +246,7 @@ impl FrameworkApp {
                 let wake = ctx.clone();
                 self.export_job = Some(ExportJob::start(
                     self.state.project.clone(),
-                    self.state.selected_profile().clone(),
+                    encodable(self.state.selected_profile()),
                     PathBuf::from(&self.state.export_path),
                     move || wake.request_repaint(),
                 ));
@@ -739,7 +739,6 @@ fn export_settings_editor(ui: &mut egui::Ui, video: &mut framework_core::VideoSe
         .show(ui, |ui| {
             ui.label("Resolution");
             ui.horizontal(|ui| {
-                // H.264 with 4:2:0 chroma needs even dimensions.
                 for (value, label) in [(&mut video.width, "width"), (&mut video.height, "height")] {
                     ui.add(
                         egui::DragValue::new(value)
@@ -748,7 +747,6 @@ fn export_settings_editor(ui: &mut egui::Ui, video: &mut framework_core::VideoSe
                             .suffix(" px"),
                     )
                     .on_hover_text(label);
-                    *value &= !1;
                 }
             });
             ui.end_row();
@@ -784,6 +782,15 @@ fn export_settings_editor(ui: &mut egui::Ui, video: &mut framework_core::VideoSe
             );
             ui.end_row();
         });
+}
+
+/// The profile with even dimensions, as H.264 with 4:2:0 chroma requires.
+/// Applied at export time so typing a width digit by digit is not disturbed.
+pub fn encodable(profile: &framework_core::ExportProfile) -> framework_core::ExportProfile {
+    let mut p = profile.clone();
+    p.video.width = (p.video.width & !1).max(2);
+    p.video.height = (p.video.height & !1).max(2);
+    p
 }
 
 /// Exact rational for a frame rate, recognising NTSC rates such as 29.97 (30000/1001).
@@ -1021,7 +1028,8 @@ mod tests {
         app.state.choose_profile(2);
         app.state.export_settings.video.width = 1001;
         frame(&mut app, &ctx, vec![]);
-        assert_eq!(app.state.export_settings.video.width, 1000);
+        assert_eq!(app.state.export_settings.video.width, 1001);
+        assert_eq!(encodable(app.state.selected_profile()).video.width, 1000);
         assert_eq!(app.state.export_profile, None);
         assert_eq!(app.state.selected_profile().name, "Custom");
     }
