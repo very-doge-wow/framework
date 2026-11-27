@@ -280,9 +280,11 @@ impl FrameworkApp {
             .flatten()
     }
 
-    fn save_project_file(&self, stem: &str) -> Option<PathBuf> {
-        self.save_file("Framework project", PROJECT_EXTENSION, stem)
-            .map(|p| with_project_extension(&p))
+    fn save_project_file(&mut self, stem: &str) -> Option<PathBuf> {
+        let chosen = self.save_file("Framework project", PROJECT_EXTENSION, stem)?;
+        project_save_target(&chosen)
+            .map_err(|e| self.state.status = e)
+            .ok()
     }
 
     /// Saves the project; the preview first closes its media files because
@@ -835,6 +837,21 @@ pub fn with_project_extension(path: &std::path::Path) -> PathBuf {
     }
 }
 
+/// Path a project chosen in a save dialog is written to. The dialog only
+/// confirmed replacing `chosen`, so an existing file that appending `.fwk`
+/// would silently replace is refused.
+pub fn project_save_target(chosen: &std::path::Path) -> Result<PathBuf, String> {
+    let path = with_project_extension(chosen);
+    if path != chosen && path.exists() {
+        Err(format!(
+            "{} already exists; select it in the dialog to replace it",
+            path.display()
+        ))
+    } else {
+        Ok(path)
+    }
+}
+
 impl eframe::App for FrameworkApp {
     // `logic` also runs while the window is minimised, unlike `ui`.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -1017,6 +1034,20 @@ mod tests {
         assert_eq!(rate_from_fps(23.976), Rational::new(24000, 1001));
         assert_eq!(rate_from_fps(59.94), Rational::new(60000, 1001));
         assert_eq!(rate_from_fps(12.5), Rational::new(12500, 1000));
+    }
+
+    #[test]
+    fn save_dialog_never_replaces_an_unconfirmed_project() {
+        let dir = std::env::temp_dir().join(format!("framework-target-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let existing = dir.join("taken.fwk");
+        std::fs::write(&existing, b"x").unwrap();
+        assert!(project_save_target(&dir.join("taken")).is_err());
+        assert_eq!(project_save_target(&existing).unwrap(), existing);
+        assert_eq!(
+            project_save_target(&dir.join("new")).unwrap(),
+            dir.join("new.fwk")
+        );
     }
 
     #[test]
