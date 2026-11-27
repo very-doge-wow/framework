@@ -304,6 +304,9 @@ mod tests {
         assert!(!bad.save_to(&tmp("bad.fwk"), SaveMode::Collect));
         assert!(bad.status.starts_with("Collect failed"));
         assert!(!tmp("bad.fwk").exists());
+        bad.project.media[0].path = PathBuf::from("http://127.0.0.1:9/clip.mp4");
+        assert!(!bad.save_to(&tmp("bad.fwk"), SaveMode::Collect));
+        assert!(bad.status.contains("not the kind"), "{}", bad.status);
     }
 
     #[test]

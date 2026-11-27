@@ -10,7 +10,9 @@ const STILL_IMAGE_CODECS: &[&str] = &["png", "mjpeg", "bmp", "tiff", "webp", "gi
 /// arbitrary local files.
 pub fn check_collectable(project: &framework_core::Project) -> Result<(), MediaError> {
     for asset in project.media.iter().filter(|m| m.embedded.is_none()) {
-        if probe(&asset.path)?.kind != asset.kind() {
+        // Only regular local files: FFmpeg would open URLs such as `http://…`.
+        let local = std::fs::metadata(&asset.path).is_ok_and(|m| m.is_file());
+        if !local || probe(&asset.path)?.kind != asset.kind() {
             return Err(MediaError::UnexpectedKind(asset.path.clone()));
         }
     }
