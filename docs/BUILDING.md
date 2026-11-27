@@ -9,7 +9,7 @@ builds reuse vcpkg's binary cache.
 
 ## 1. Prerequisites
 
-| | macOS (Apple silicon) | Linux (x86_64) | Windows (x86_64) |
+| | macOS (Apple silicon) | Linux (x86_64, arm64) | Windows (x86_64, arm64) |
 |---|---|---|---|
 | Rust | [rustup](https://rustup.rs) | [rustup](https://rustup.rs) | [rustup](https://rustup.rs) (MSVC toolchain) |
 | C toolchain | Xcode Command Line Tools: `xcode-select --install` | `build-essential` | Visual Studio 2022 Build Tools with "Desktop development with C++" |
@@ -37,8 +37,9 @@ scripts/vcpkg-install.sh
 This clones vcpkg next to the repository (`../vcpkg`, override with
 `VCPKG_ROOT`), checks out the pinned baseline and installs FFmpeg into
 `vcpkg_installed/<triplet>/`. The triplet is detected automatically
-(`arm64-osx-dynamic-release`, `x64-linux-dynamic-release` or
-`x64-windows-release`); override with `TRIPLET=…`.
+(`arm64-osx-dynamic-release`, `x64-linux-dynamic-release`,
+`arm64-linux-dynamic-release`, `x64-windows-release` or
+`arm64-windows-release`); override with `TRIPLET=…`.
 
 ## 3. Point Cargo at FFmpeg
 

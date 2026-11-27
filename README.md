@@ -8,7 +8,7 @@ A fast, cross-platform video editor written in Rust — developed 100 % agentica
 - MP4 (H.264/AAC) export with built-in profiles (1080p, 4K, vertical, square, …) and custom resolution, frame rate and bitrate
 - Planned: title generation, automatic white balance with weighting modes, and a
   "piece to camera" mode with automatic, editable emphasis zooms
-- macOS (Apple silicon), Linux (x86_64) and Windows (x86_64)
+- macOS (Apple silicon), Linux (x86_64, arm64) and Windows (x86_64, arm64)
 
 ## Download
 

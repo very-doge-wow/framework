@@ -31,7 +31,7 @@ Framework is developed agentically. Read this file, then follow it.
   `framework_media::synthetic` instead of committing binary fixtures.
 - **License: GPL-3.0-or-later.** Every new dependency must be compatible
   (`cargo deny check licenses` runs in CI). Never enable FFmpeg `nonfree`.
-- Must build and run on **macOS (arm64), Linux (x86_64) and Windows (x86_64)**.
+- Must build and run on **macOS (arm64), Linux (x86_64, arm64) and Windows (x86_64, arm64)**.
 - `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings` and
   `cargo test --workspace` must pass before pushing.
 - Update `docs/ROADMAP.md` (tick items, add new ones) in the same PR that

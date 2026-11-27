@@ -30,12 +30,19 @@ jobs:
           - name: linux-x86_64
             os: ubuntu-24.04
             triplet: x64-linux-dynamic-release
+            coverage: true
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+            triplet: arm64-linux-dynamic-release
           - name: macos-arm64
             os: macos-15
             triplet: arm64-osx-dynamic-release
           - name: windows-x86_64
             os: windows-2025
             triplet: x64-windows-release
+          - name: windows-arm64
+            os: windows-11-arm
+            triplet: arm64-windows-release
     defaults:
       run:
         shell: bash
@@ -55,9 +62,27 @@ jobs:
             nasm pkg-config clang libclang-dev patchelf \
             libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev libxi-dev libxcursor-dev libgl1-mesa-dev
 
+      - name: Ensure rustup
+        run: |
+          if ! command -v rustup >/dev/null; then
+            if [[ "$RUNNER_OS" == "Windows" ]]; then
+              arch=x86_64; [[ "${PROCESSOR_ARCHITECTURE:-}" == "ARM64" ]] && arch=aarch64
+              curl -sSfLo rustup-init.exe "https://static.rust-lang.org/rustup/dist/${arch}-pc-windows-msvc/rustup-init.exe"
+              ./rustup-init.exe -y --default-toolchain none --profile minimal
+              echo "$USERPROFILE\\.cargo\\bin" >> "$GITHUB_PATH"
+            else
+              curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none --profile minimal
+              echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            fi
+          fi
+
       - name: Configure libclang (Windows)
         if: runner.os == 'Windows'
-        run: echo "LIBCLANG_PATH=C:\\Program Files\\LLVM\\bin" >> "$GITHUB_ENV"
+        run: |
+          if [[ ! -f "/c/Program Files/LLVM/bin/libclang.dll" ]]; then
+            choco install llvm -y --no-progress
+          fi
+          echo "LIBCLANG_PATH=C:\\Program Files\\LLVM\\bin" >> "$GITHUB_ENV"
 
       - name: Restore vcpkg binary cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -86,7 +111,7 @@ jobs:
         run: scripts/ffmpeg-env.sh >> "$GITHUB_ENV"
 
       - name: Format
-        if: runner.os == 'Linux'
+        if: matrix.coverage
         run: cargo fmt --all --check
 
       - name: Clippy
@@ -96,7 +121,7 @@ jobs:
         run: cargo test --locked --workspace
 
       - name: Coverage (>= 95 % lines)
-        if: runner.os == 'Linux'
+        if: matrix.coverage
         run: |
           cargo install --locked cargo-llvm-cov --version "$CARGO_LLVM_COV_VERSION"
           scripts/coverage.sh
@@ -105,7 +130,7 @@ jobs:
           CARGO_LLVM_COV_VERSION: "0.9.2"
 
       - name: License and dependency policy
-        if: runner.os == 'Linux'
+        if: matrix.coverage
         run: |
           cargo install --locked cargo-deny --version "$CARGO_DENY_VERSION"
           cargo deny --log-level error check licenses bans sources

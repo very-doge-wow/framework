@@ -10,8 +10,10 @@ cd "$(dirname "$0")/.."
 if [[ -z "${TRIPLET:-}" ]]; then
   case "$(uname -s)-$(uname -m)" in
     Linux-x86_64) TRIPLET=x64-linux-dynamic-release ;;
+    Linux-aarch64) TRIPLET=arm64-linux-dynamic-release ;;
     Darwin-arm64) TRIPLET=arm64-osx-dynamic-release ;;
-    MINGW*|MSYS*|CYGWIN*) TRIPLET=x64-windows-release ;;
+    MINGW*|MSYS*|CYGWIN*)
+      if [[ "${PROCESSOR_ARCHITECTURE:-}" == "ARM64" ]]; then TRIPLET=arm64-windows-release; else TRIPLET=x64-windows-release; fi ;;
     *) echo "unsupported host $(uname -s)-$(uname -m); set TRIPLET" >&2; exit 1 ;;
   esac
 fi
