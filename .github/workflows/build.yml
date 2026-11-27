@@ -5,7 +5,7 @@ on:
   workflow_call:
     inputs:
       version:
-        description: Release version to stamp into the build and upload to the GitHub Release (empty for CI builds).
+        description: Release version to stamp into the packages (empty for CI builds).
         type: string
         default: ""
 
@@ -21,8 +21,6 @@ jobs:
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    permissions:
-      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -157,9 +155,3 @@ jobs:
           name: framework-${{ matrix.name }}
           path: ${{ steps.package.outputs.archive }}
           if-no-files-found: error
-
-      - name: Upload to GitHub Release
-        if: inputs.version != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload "v${{ inputs.version }}" "${{ steps.package.outputs.archive }}" --clobber

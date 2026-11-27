@@ -1,9 +1,8 @@
 name: ci
 
+# Pushes to main are built by release.yml.
 on:
   pull_request:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 concurrency:
@@ -16,5 +15,3 @@ permissions:
 jobs:
   build:
     uses: ./.github/workflows/build.yml
-    permissions:
-      contents: write

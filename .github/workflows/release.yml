@@ -1,8 +1,9 @@
 name: release
 
-# On every push to main, semantic-release derives the next version from the
-# Conventional Commits since the last tag, creates the tag and GitHub Release,
-# and the build matrix attaches the per-platform packages and FFmpeg sources.
+# Every push to main is built exactly once. semantic-release first computes the
+# next version in dry-run mode, the build matrix stamps that version into the
+# packages, and only after every package and the FFmpeg source bundle succeeded
+# does semantic-release create the tag and GitHub Release with those artifacts.
 on:
   push:
     branches: [main]
@@ -15,7 +16,7 @@ permissions:
   contents: read
 
 jobs:
-  semantic-release:
+  version:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -29,41 +30,60 @@ jobs:
         with:
           node-version-file: package.json
       - run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: semantic-release
+      - name: Next version (dry run)
+        id: version
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: npx --no-install semantic-release
-      - name: Detect new version
-        id: version
         run: |
-          git fetch --tags --force
-          tag="$(git tag --points-at HEAD --list 'v*' | sort -V | tail -n1)"
-          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
-          echo "Released: ${tag:-nothing}"
+          npx --no-install semantic-release --dry-run | tee release-dry-run.log
+          version="$(sed -n 's/.*The next release version is \([^ ]*\).*/\1/p' release-dry-run.log | tail -n1)"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Next release: ${version:-none}"
 
   build:
-    needs: semantic-release
-    if: needs.semantic-release.outputs.version != ''
+    needs: version
     uses: ./.github/workflows/build.yml
-    permissions:
-      contents: write
     with:
-      version: ${{ needs.semantic-release.outputs.version }}
+      version: ${{ needs.version.outputs.version }}
 
   sources:
-    needs: semantic-release
-    if: needs.semantic-release.outputs.version != ''
+    needs: version
+    if: needs.version.outputs.version != ''
     runs-on: ubuntu-24.04
-    permissions:
-      contents: write
     env:
       VCPKG_ROOT: ${{ github.workspace }}/../vcpkg
-      VERSION: ${{ needs.semantic-release.outputs.version }}
+      VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Bundle FFmpeg/x264 corresponding source (GPL)
         run: scripts/bundle-sources.sh "dist/framework-${VERSION}-ffmpeg-x264-sources.tar.gz"
-      - name: Upload to GitHub Release
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: framework-sources
+          path: dist/framework-${{ env.VERSION }}-ffmpeg-x264-sources.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: [version, build, sources]
+    if: needs.version.outputs.version != ''
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: package.json
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          pattern: framework-*
+          merge-multiple: true
+      - run: ls -l dist
+      - name: Tag and publish the release with the built artifacts
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload "v${VERSION}" "dist/framework-${VERSION}-ffmpeg-x264-sources.tar.gz" --clobber
+          GITHUB_TOKEN: ${{ github.token }}
+        run: npx --no-install semantic-release

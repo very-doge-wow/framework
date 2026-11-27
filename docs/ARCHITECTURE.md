@@ -75,8 +75,8 @@ FFmpeg/x264/zlib source archive (`scripts/bundle-sources.sh`).
 - `.github/workflows/build.yml` (reusable): fmt, clippy, tests, coverage
   gate, cargo-deny, release build, packaging and smoke test on Linux, macOS
   and Windows.
-- `ci.yml` runs it for PRs and `main`; `commitlint.yml` checks Conventional
-  Commits.
-- `release.yml` runs semantic-release on `main`. If a release is due it
-  creates the tag and GitHub Release, then runs the build with the version
-  stamped in and uploads the packages and the FFmpeg source bundle.
+- `ci.yml` runs it for PRs; `commitlint.yml` checks Conventional Commits.
+- `release.yml` builds every push to `main` exactly once: semantic-release
+  computes the next version in dry-run mode, the build stamps it into the
+  packages, and only when all packages and the FFmpeg source bundle succeeded
+  does semantic-release create the tag and GitHub Release with those artifacts.
