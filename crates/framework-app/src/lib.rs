@@ -21,6 +21,7 @@ pub fn native_options() -> eframe::NativeOptions {
     eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Framework")
+            .with_app_id("framework")
             .with_inner_size([1440.0, 900.0])
             .with_min_inner_size([960.0, 600.0]),
         renderer: eframe::Renderer::Wgpu,

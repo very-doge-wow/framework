@@ -1,4 +1,4 @@
-use crate::state::EditorState;
+use crate::state::{EditorState, MAX_ZOOM, MIN_ZOOM};
 use crate::theme;
 use crate::worker::{ExportJob, ExportState, PreviewWorker};
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle, Vec2};
@@ -66,6 +66,8 @@ pub struct FrameworkApp {
     pub export_window: bool,
     pub browser_tab: BrowserTab,
     pub actions: Vec<UiAction>,
+    /// Width of the timeline's time area in the last frame, for zoom steps and fitting.
+    timeline_width: f32,
     /// Action waiting for the user to resolve unsaved changes.
     pub pending: Option<UiAction>,
     /// When false, file dialogs are skipped (used by tests).
@@ -75,6 +77,8 @@ pub struct FrameworkApp {
 impl FrameworkApp {
     pub fn new(ctx: &egui::Context) -> Self {
         theme::apply(ctx);
+        // Cmd/Ctrl +/− zoom the timeline instead of the whole UI.
+        ctx.options_mut(|o| o.zoom_with_keyboard = false);
         let wake_ctx = ctx.clone();
         Self {
             state: EditorState::default(),
@@ -88,6 +92,7 @@ impl FrameworkApp {
             export_window: false,
             browser_tab: BrowserTab::Media,
             actions: Vec::new(),
+            timeline_width: 0.0,
             pending: None,
             use_dialogs: true,
         }
@@ -306,6 +311,18 @@ impl FrameworkApp {
             if i.consume_key(egui::Modifiers::COMMAND, egui::Key::I) {
                 self.actions.push(UiAction::Import);
             }
+            // Cmd/Ctrl + and Cmd/Ctrl − zoom the timeline (egui's UI zoom is disabled).
+            for key in [egui::Key::Plus, egui::Key::Equals] {
+                if i.consume_key(egui::Modifiers::COMMAND, key) {
+                    self.state.zoom_step(true, self.timeline_width);
+                }
+            }
+            if i.consume_key(egui::Modifiers::COMMAND, egui::Key::Minus) {
+                self.state.zoom_step(false, self.timeline_width);
+            }
+            if i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num0) {
+                self.state.zoom_to_fit(self.timeline_width);
+            }
         });
     }
 
@@ -361,7 +378,9 @@ impl FrameworkApp {
 
     fn media_bin(&mut self, ui: &mut egui::Ui) {
         egui::Panel::left("browser")
+            .resizable(true)
             .default_size(260.0)
+            .size_range(180.0..=640.0)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     for (tab, label) in [
@@ -446,10 +465,13 @@ impl FrameworkApp {
     }
 
     fn timeline(&mut self, ui: &mut egui::Ui) {
-        let height = RULER_HEIGHT + TRACK_HEIGHT * self.state.project.tracks.len() as f32 + 16.0;
+        let height = RULER_HEIGHT + TRACK_HEIGHT * self.state.project.tracks.len() as f32 + 48.0;
         egui::Panel::bottom("timeline")
-            .exact_size(height.max(160.0))
+            .resizable(true)
+            .default_size(height.max(200.0))
+            .size_range(120.0..=f32::INFINITY)
             .show(ui, |ui| {
+                self.timeline_toolbar(ui);
                 let (rect, response) =
                     ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
                 self.timeline_input(ui, rect, &response);
@@ -457,8 +479,42 @@ impl FrameworkApp {
             });
     }
 
+    fn timeline_toolbar(&mut self, ui: &mut egui::Ui) {
+        let cmd = if cfg!(target_os = "macos") {
+            "Cmd"
+        } else {
+            "Ctrl"
+        };
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Zoom").color(theme::TEXT_DIM));
+            let width = self.timeline_width;
+            if ui
+                .add_enabled(self.state.zoom > MIN_ZOOM, egui::Button::new("−"))
+                .on_hover_text(format!("Zoom out ({cmd} − or {cmd} + scroll)"))
+                .clicked()
+            {
+                self.state.zoom_step(false, width);
+            }
+            if ui
+                .add_enabled(self.state.zoom < MAX_ZOOM, egui::Button::new("+"))
+                .on_hover_text(format!("Zoom in ({cmd} + or {cmd} + scroll)"))
+                .clicked()
+            {
+                self.state.zoom_step(true, width);
+            }
+            if ui
+                .button("Fit")
+                .on_hover_text(format!("Show the whole project ({cmd} 0)"))
+                .clicked()
+            {
+                self.state.zoom_to_fit(width);
+            }
+        });
+    }
+
     fn timeline_input(&mut self, ui: &egui::Ui, rect: Rect, response: &egui::Response) {
         let origin = rect.left() + HEADER_WIDTH;
+        self.timeline_width = (rect.right() - origin).max(0.0);
         if let Some(pos) = response.interact_pointer_pos()
             && pos.x >= origin
         {
@@ -466,9 +522,12 @@ impl FrameworkApp {
                 .set_playhead(self.state.x_to_time(pos.x - origin));
         }
         if response.hovered() {
-            let (scroll, zoom) = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta()));
+            // Cmd/Ctrl + wheel and pinch arrive as zoom_delta.
+            let (scroll, zoom, pointer) =
+                ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta(), i.pointer.hover_pos()));
             if zoom != 1.0 {
-                self.state.zoom_by(zoom);
+                let x = pointer.map_or(0.0, |p| (p.x - origin).max(0.0));
+                self.state.zoom_around(zoom, x);
             }
             if scroll.x != 0.0 || scroll.y != 0.0 {
                 let delta = -(scroll.x + scroll.y) / self.state.zoom;
@@ -609,18 +668,27 @@ impl FrameworkApp {
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
+                let mut chosen = None;
                 egui::ComboBox::from_label("Profile")
                     .selected_text(self.state.selected_profile().name.clone())
                     .show_ui(ui, |ui| {
                         for (i, p) in self.state.profiles.iter().enumerate() {
-                            ui.selectable_value(&mut self.state.export_profile, i, &p.name);
+                            let selected = self.state.export_profile == Some(i);
+                            if ui.selectable_label(selected, &p.name).clicked() {
+                                chosen = Some(i);
+                            }
                         }
+                        ui.add_enabled(
+                            false,
+                            egui::Button::selectable(self.state.export_profile.is_none(), "Custom"),
+                        );
                     });
-                let p = self.state.selected_profile();
-                ui.label(format!(
-                    "{}×{} · {} fps · {} kbit/s · H.264/AAC MP4",
-                    p.video.width, p.video.height, p.video.frame_rate, p.video.bitrate_kbps
-                ));
+                if let Some(i) = chosen {
+                    self.state.choose_profile(i);
+                }
+                export_settings_editor(ui, &mut self.state.export_settings.video);
+                self.state.sync_custom_profile();
+                ui.label(egui::RichText::new("H.264 / AAC · MP4").color(theme::TEXT_DIM));
                 ui.horizontal(|ui| {
                     ui.text_edit_singleline(&mut self.state.export_path);
                     if ui.button("Browse…").clicked() {
@@ -654,6 +722,73 @@ impl FrameworkApp {
                 }
             });
         self.export_window = open;
+    }
+}
+
+/// Free resolution, frame rate and bitrate fields of the export dialog.
+fn export_settings_editor(ui: &mut egui::Ui, video: &mut framework_core::VideoSettings) {
+    egui::Grid::new("export-settings")
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Resolution");
+            ui.horizontal(|ui| {
+                // H.264 with 4:2:0 chroma needs even dimensions.
+                for (value, label) in [(&mut video.width, "width"), (&mut video.height, "height")] {
+                    ui.add(
+                        egui::DragValue::new(value)
+                            .range(16..=8192)
+                            .speed(2.0)
+                            .suffix(" px"),
+                    )
+                    .on_hover_text(label);
+                    *value &= !1;
+                }
+            });
+            ui.end_row();
+            ui.label("Frame rate");
+            let mut fps = video.frame_rate.as_f64();
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::DragValue::new(&mut fps)
+                        .range(1.0..=240.0)
+                        .max_decimals(3)
+                        .suffix(" fps"),
+                );
+                egui::ComboBox::from_id_salt("fps-presets")
+                    .selected_text("Presets")
+                    .show_ui(ui, |ui| {
+                        for preset in [23.976, 24.0, 25.0, 29.97, 30.0, 50.0, 59.94, 60.0] {
+                            if ui.selectable_label(false, format!("{preset}")).clicked() {
+                                fps = preset;
+                            }
+                        }
+                    });
+            });
+            if (fps - video.frame_rate.as_f64()).abs() > 1e-6 {
+                video.frame_rate = rate_from_fps(fps);
+            }
+            ui.end_row();
+            ui.label("Video bitrate");
+            ui.add(
+                egui::DragValue::new(&mut video.bitrate_kbps)
+                    .range(100..=500_000)
+                    .speed(50.0)
+                    .suffix(" kbit/s"),
+            );
+            ui.end_row();
+        });
+}
+
+/// Exact rational for a frame rate, recognising NTSC rates such as 29.97 (30000/1001).
+pub fn rate_from_fps(fps: f64) -> framework_core::Rational {
+    let ntsc = (fps * 1.001).round();
+    if fps.fract() == 0.0 {
+        framework_core::Rational::new(fps.max(1.0) as u32, 1)
+    } else if (ntsc * 1000.0 / 1001.0 - fps).abs() < 0.005 {
+        framework_core::Rational::new(ntsc as u32 * 1000, 1001)
+    } else {
+        framework_core::Rational::new((fps * 1000.0).round().max(1.0) as u32, 1000)
     }
 }
 
@@ -816,6 +951,68 @@ mod tests {
         );
         assert!(app.open_project(&path));
         assert!(app.state.project.media.iter().all(|m| m.embedded.is_some()));
+    }
+
+    #[test]
+    fn timeline_zoom_shortcuts() {
+        let (ctx, mut app) = app_with_project();
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.timeline_width > 0.0);
+        let zoom = app.state.zoom;
+        frame(
+            &mut app,
+            &ctx,
+            vec![key(egui::Key::Plus, Modifiers::COMMAND)],
+        );
+        assert_eq!(app.state.zoom, zoom * crate::state::ZOOM_STEP);
+        frame(
+            &mut app,
+            &ctx,
+            vec![key(egui::Key::Equals, Modifiers::COMMAND)],
+        );
+        frame(
+            &mut app,
+            &ctx,
+            vec![key(egui::Key::Minus, Modifiers::COMMAND)],
+        );
+        frame(
+            &mut app,
+            &ctx,
+            vec![key(egui::Key::Minus, Modifiers::COMMAND)],
+        );
+        assert!((app.state.zoom - zoom).abs() < 1e-3);
+        frame(
+            &mut app,
+            &ctx,
+            vec![key(egui::Key::Num0, Modifiers::COMMAND)],
+        );
+        let duration = app.state.project.duration().as_seconds() as f32;
+        assert!((app.state.zoom * duration - app.timeline_width).abs() < 1.0);
+        // The whole UI does not zoom.
+        assert_eq!(ctx.zoom_factor(), 1.0);
+    }
+
+    #[test]
+    fn export_dialog_with_custom_settings() {
+        let (ctx, mut app) = app_with_project();
+        app.export_window = true;
+        frame(&mut app, &ctx, vec![]);
+        app.state.choose_profile(2);
+        app.state.export_settings.video.width = 1001;
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.state.export_settings.video.width, 1000);
+        assert_eq!(app.state.export_profile, None);
+        assert_eq!(app.state.selected_profile().name, "Custom");
+    }
+
+    #[test]
+    fn frame_rates_become_exact_rationals() {
+        use framework_core::Rational;
+        assert_eq!(rate_from_fps(25.0), Rational::new(25, 1));
+        assert_eq!(rate_from_fps(29.97), Rational::new(30000, 1001));
+        assert_eq!(rate_from_fps(23.976), Rational::new(24000, 1001));
+        assert_eq!(rate_from_fps(59.94), Rational::new(60000, 1001));
+        assert_eq!(rate_from_fps(12.5), Rational::new(12500, 1000));
     }
 
     #[test]

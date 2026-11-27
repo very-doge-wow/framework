@@ -14,7 +14,7 @@ framework-core = { path = "crates/framework-core" }
 framework-media = { path = "crates/framework-media" }
 anyhow = "=1.0.105"
 clap = { version = "=4.6.10", features = ["derive"] }
-eframe = { version = "=0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "links", "wayland", "wgpu", "x11"] }
+eframe = { version = "=0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "links", "persistence", "wayland", "wgpu", "x11"] }
 egui = "=0.37.0"
 ffmpeg-next = { version = "=9.1.0", default-features = false, features = ["codec", "format", "filter", "software-resampling", "software-scaling"] }
 rfd = "=0.18.0"
