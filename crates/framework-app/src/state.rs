@@ -239,9 +239,11 @@ mod tests {
 
     #[test]
     fn coordinates_zoom_and_ruler() {
-        let mut s = EditorState::default();
-        s.zoom = 100.0;
-        s.scroll = 1.0;
+        let mut s = EditorState {
+            zoom: 100.0,
+            scroll: 1.0,
+            ..Default::default()
+        };
         assert_eq!(s.time_to_x(Time::from_seconds(2.0)), 100.0);
         assert_eq!(s.x_to_time(100.0), Time::from_seconds(2.0));
         assert_eq!(s.x_to_time(-500.0), Time::ZERO);

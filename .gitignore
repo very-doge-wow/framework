@@ -31,3 +31,7 @@ node_modules/
 
 # Packaging output
 dist/
+
+# Media written by tests or manual runs
+*.mp4
+*.partial
