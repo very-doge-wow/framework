@@ -62,7 +62,7 @@ pub fn probe(path: &Path) -> Result<MediaInfo, MediaError> {
         audio.is_none()
             && (format_name == "image2"
                 || format_name.ends_with("_pipe")
-                || (STILL_IMAGE_CODECS.contains(&v.codec.as_str()) && *frames <= 1))
+                || (STILL_IMAGE_CODECS.contains(&v.codec.as_str()) && *frames == 1))
     });
 
     let duration = (ictx.duration() > 0)
