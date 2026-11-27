@@ -213,13 +213,13 @@ mod tests {
         assert_eq!(s.selected_clip, Some(clip));
         assert_eq!(s.project.media[0].kind(), MediaKind::Video);
 
-        let path = tmp("p.framework.json");
+        let path = tmp("p.fwk");
         assert!(s.save_to(&path, SaveMode::Reference));
         assert!(!s.dirty);
         let mut other = EditorState::default();
         assert!(other.open(&path));
         assert_eq!(other.project, s.project);
-        assert!(other.title().starts_with("p.framework.json"));
+        assert!(other.title().starts_with("p.fwk"));
         assert!(!other.open(&tmp("nope.json")));
         assert!(other.status.starts_with("Open failed"));
         assert!(!other.save_to(&tmp("no/such/dir/x.fwk"), SaveMode::Reference));

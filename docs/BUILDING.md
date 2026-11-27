@@ -77,9 +77,9 @@ scripts/smoke-test.sh <dir printed by package.sh>
 
 ```sh
 framework-cli probe clip.mp4
-framework-cli new my.framework.json intro.mp4 logo.png music.wav
-framework-cli export my.framework.json -o out.mp4 --profile 1080p30
-framework-cli export my.framework.json -o out.mp4 --profile 1080p30 --width 1280 --height 720 --fps 25 --bitrate 5000
+framework-cli new my.fwk intro.mp4 logo.png music.wav
+framework-cli export my.fwk -o out.mp4 --profile 1080p30
+framework-cli export my.fwk -o out.mp4 --profile 1080p30 --width 1280 --height 720 --fps 25 --bitrate 5000
 ```
 
 ## Troubleshooting

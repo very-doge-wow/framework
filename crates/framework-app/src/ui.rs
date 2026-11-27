@@ -784,9 +784,55 @@ mod tests {
         app.use_dialogs = false;
         app.state = EditorState::new(project);
         app.state.export_path = dir.join("ui-export.mp4").to_string_lossy().into_owned();
-        app.state.project_path = Some(dir.join("project.framework.json"));
+        app.state.project_path = Some(dir.join("project.fwk"));
         app.touch();
         (ctx, app)
+    }
+
+    #[test]
+    fn collect_and_save_embeds_media() {
+        let (ctx, mut app) = app_with_project();
+        let path = app
+            .state
+            .project_path
+            .clone()
+            .unwrap()
+            .with_file_name("collected.fwk");
+        app.save_project(&path, SaveMode::Collect);
+        assert!(
+            app.state.status.contains("embedded media"),
+            "{}",
+            app.state.status
+        );
+        assert!(!app.state.dirty);
+        assert!(app.state.project.media.iter().all(|m| m.location.is_some()));
+        // Re-saving over the open container works while the preview reads from it.
+        frame(&mut app, &ctx, vec![]);
+        app.save_project(&path, SaveMode::Reference);
+        assert!(
+            app.state.status.starts_with("Saved"),
+            "{}",
+            app.state.status
+        );
+        assert!(app.open_project(&path));
+        assert!(app.state.project.media.iter().all(|m| m.embedded.is_some()));
+    }
+
+    #[test]
+    fn project_extension_is_appended() {
+        use std::path::Path;
+        assert_eq!(
+            with_project_extension(Path::new("a/b")),
+            Path::new("a/b.fwk")
+        );
+        assert_eq!(
+            with_project_extension(Path::new("a/b.fwk")),
+            Path::new("a/b.fwk")
+        );
+        assert_eq!(
+            with_project_extension(Path::new("b.json")),
+            Path::new("b.json.fwk")
+        );
     }
 
     #[test]
@@ -908,7 +954,7 @@ mod tests {
             .parent()
             .unwrap()
             .to_owned();
-        let path = dir.join("saved.framework.json");
+        let path = dir.join("saved.fwk");
         assert!(app.state.save_to(&path, SaveMode::Reference));
         frame(&mut app, &ctx, vec![]);
         for action in [

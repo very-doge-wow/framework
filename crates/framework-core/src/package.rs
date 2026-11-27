@@ -131,3 +131,132 @@ impl Project {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::project::{MediaAsset, MediaInfo, MediaKind};
+    use crate::time::Time;
+
+    fn dir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("framework-pkg-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn project_with(media: &Path) -> Project {
+        let mut p = Project::new("pkg");
+        let info = MediaInfo {
+            kind: MediaKind::Audio,
+            duration: Some(Time::from_seconds(1.0)),
+            video: None,
+            audio: None,
+        };
+        p.add_media(MediaAsset::new(media, info));
+        p
+    }
+
+    fn embedded_bytes(p: &Project) -> Vec<u8> {
+        let loc = p.media[0].location.as_ref().unwrap();
+        let mut f = File::open(&loc.container).unwrap();
+        f.seek(SeekFrom::Start(loc.start)).unwrap();
+        let mut buf = vec![0; loc.len as usize];
+        f.read_exact(&mut buf).unwrap();
+        buf
+    }
+
+    #[test]
+    fn reference_save_keeps_paths() {
+        let d = dir("ref");
+        let media = d.join("a.bin");
+        fs::write(&media, b"media").unwrap();
+        let mut p = project_with(&media);
+        let path = d.join("p.fwk");
+        p.save(&path).unwrap();
+        assert!(!d.join("p.fwk.tmp").exists());
+        let loaded = Project::load(&path).unwrap();
+        assert_eq!(loaded.media[0].path, media);
+        assert_eq!(loaded.media[0].embedded, None);
+        assert_eq!(loaded.media[0].source(), media);
+        let mut archive = ZipArchive::new(File::open(&path).unwrap()).unwrap();
+        let mut mime = String::new();
+        archive
+            .by_index(0)
+            .unwrap()
+            .read_to_string(&mut mime)
+            .unwrap();
+        assert_eq!(mime, PROJECT_MIME);
+    }
+
+    #[test]
+    fn collect_embeds_media_and_survives_resave() {
+        let d = dir("collect");
+        let media = d.join("clip.bin");
+        fs::write(&media, b"0123456789").unwrap();
+        let mut p = project_with(&media);
+        let path = d.join("c.fwk");
+        p.save_as(&path, SaveMode::Collect).unwrap();
+        assert_eq!(embedded_bytes(&p), b"0123456789");
+        fs::remove_file(&media).unwrap();
+
+        let mut loaded = Project::load(&path).unwrap();
+        assert!(
+            loaded.media[0]
+                .embedded
+                .as_ref()
+                .unwrap()
+                .ends_with("/clip.bin")
+        );
+        assert_eq!(embedded_bytes(&loaded), b"0123456789");
+        let source = loaded.media[0].source().to_string_lossy().into_owned();
+        assert!(source.starts_with("subfile,,start,"), "{source}");
+
+        // A normal save over the same file keeps the media embedded.
+        loaded.name = "renamed".into();
+        loaded.save(&path).unwrap();
+        assert_eq!(embedded_bytes(&loaded), b"0123456789");
+        let again = Project::load(&path).unwrap();
+        assert_eq!(again.name, "renamed");
+        assert_eq!(embedded_bytes(&again), b"0123456789");
+    }
+
+    #[test]
+    fn legacy_json_and_errors() {
+        let d = dir("legacy");
+        let media = d.join("m.bin");
+        fs::write(&media, b"x").unwrap();
+        let p = project_with(&media);
+        let json = d.join("old.json");
+        fs::write(&json, p.to_json().unwrap()).unwrap();
+        assert_eq!(Project::load(&json).unwrap().media[0].path, media);
+        fs::write(d.join("empty"), b"").unwrap();
+        assert!(Project::load(d.join("empty")).is_err());
+
+        // Collecting a missing file fails and leaves no temporary file behind.
+        let mut missing = project_with(&d.join("gone.bin"));
+        let out = d.join("missing.fwk");
+        assert!(missing.save_as(&out, SaveMode::Collect).is_err());
+        assert!(!d.join("missing.fwk.tmp").exists());
+
+        // Embedded media without a container location cannot be saved.
+        let mut broken = project_with(&media);
+        broken.media[0].embedded = Some("media/x".into());
+        assert!(matches!(
+            broken.save(&out),
+            Err(ProjectError::MissingEmbedded(_))
+        ));
+
+        // A container whose project points at a missing entry is rejected.
+        let file = File::create(&out).unwrap();
+        let mut zip = ZipWriter::new(file);
+        zip.start_file(PROJECT_ENTRY, SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(broken.to_json().unwrap().as_bytes()).unwrap();
+        zip.finish().unwrap();
+        assert!(matches!(
+            Project::load(&out),
+            Err(ProjectError::MissingEmbedded(_))
+        ));
+    }
+}

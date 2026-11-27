@@ -183,6 +183,17 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         };
         assert_eq!((img.width, img.height), (32, 18));
+
+        // After releasing its media files the worker still renders.
+        worker.release_media();
+        worker.request(&p, Time::from_seconds(0.2));
+        let img = loop {
+            if let Some(r) = worker.poll() {
+                break r.unwrap();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        assert_eq!(img.width, 32);
     }
 
     #[test]
