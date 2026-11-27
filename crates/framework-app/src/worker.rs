@@ -175,7 +175,9 @@ mod tests {
             ExportState::Failed(msg) => assert!(msg.contains("cancelled")),
             other => panic!("unexpected {other:?}"),
         }
-        assert!(!out.exists());
+        // The cancelled re-export keeps the previous file and leaves no partial output.
+        assert!(out.exists());
+        assert!(!out.with_extension("mp4.partial").exists());
     }
 
     #[test]

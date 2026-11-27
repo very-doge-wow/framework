@@ -284,8 +284,8 @@ impl AudioMixer<'_> {
 /// Renders the whole project to `output` using `profile`.
 ///
 /// Video tracks are composited by taking the topmost visible clip at each
-/// frame; audio from all unmuted tracks is mixed. On error or cancellation
-/// the partial output file is removed.
+/// frame; audio from all unmuted tracks is mixed. The file is rendered to
+/// `<output>.partial` and only replaces `output` on success.
 pub fn export(
     project: &Project,
     profile: &ExportProfile,
@@ -293,9 +293,13 @@ pub fn export(
     cancel: &AtomicBool,
     mut progress: impl FnMut(ExportProgress),
 ) -> Result<(), MediaError> {
-    let result = render(project, profile, output, cancel, &mut progress);
+    let mut partial = output.as_os_str().to_owned();
+    partial.push(".partial");
+    let partial = std::path::PathBuf::from(partial);
+    let result = render(project, profile, &partial, cancel, &mut progress)
+        .and_then(|()| std::fs::rename(&partial, output).map_err(MediaError::from));
     if result.is_err() {
-        let _ = std::fs::remove_file(output);
+        let _ = std::fs::remove_file(&partial);
     }
     result
 }
