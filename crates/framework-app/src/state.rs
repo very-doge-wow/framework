@@ -1,7 +1,7 @@
 use framework_core::{ClipId, ExportProfile, MediaAsset, MediaId, Project, SaveMode, Time};
 use std::path::{Path, PathBuf};
 
-pub const MIN_ZOOM: f32 = 2.0;
+pub const MIN_ZOOM: f32 = 0.01;
 pub const MAX_ZOOM: f32 = 2000.0;
 /// Zoom factor of one zoom-in/zoom-out step (buttons and shortcuts).
 pub const ZOOM_STEP: f32 = 1.25;
@@ -186,13 +186,14 @@ impl EditorState {
 
     /// Spacing in seconds between ruler labels that keeps them at least `min_px` apart.
     pub fn ruler_step(&self, min_px: f32) -> f64 {
-        const STEPS: [f64; 12] = [
-            0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 300.0, 600.0,
+        const STEPS: [f64; 16] = [
+            0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 300.0, 600.0, 1800.0, 3600.0,
+            7200.0, 14400.0,
         ];
         STEPS
             .into_iter()
             .find(|s| *s * f64::from(self.zoom) >= f64::from(min_px))
-            .unwrap_or(3600.0)
+            .unwrap_or(28800.0)
     }
 
     /// Saves to `path`; [`SaveMode::Collect`] embeds all media into the file.
@@ -343,8 +344,8 @@ mod tests {
         assert_eq!(s.zoom, MIN_ZOOM);
         s.zoom = 100.0;
         assert_eq!(s.ruler_step(80.0), 1.0);
-        s.zoom = 0.01;
-        assert_eq!(s.ruler_step(80.0), 3600.0);
+        s.zoom = 0.001;
+        assert_eq!(s.ruler_step(80.0), 28800.0);
         s.set_playhead(Time::from_seconds(-1.0));
         assert_eq!(s.playhead, Time::ZERO);
 
