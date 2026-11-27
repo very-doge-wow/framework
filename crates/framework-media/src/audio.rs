@@ -23,6 +23,7 @@ pub struct AudioReader {
     buffer: VecDeque<f32>,
     buffer_start: Option<i64>,
     eof: bool,
+    resampler_drained: bool,
 }
 
 impl AudioReader {
@@ -57,6 +58,7 @@ impl AudioReader {
             buffer: VecDeque::new(),
             buffer_start: None,
             eof: false,
+            resampler_drained: false,
         })
     }
 
@@ -74,6 +76,7 @@ impl AudioReader {
         self.buffer.clear();
         self.buffer_start = None;
         self.eof = false;
+        self.resampler_drained = false;
         Ok(())
     }
 
@@ -110,6 +113,27 @@ impl AudioReader {
         Ok(())
     }
 
+    /// Appends samples still queued inside the resampler (e.g. when upsampling)
+    /// once the decoder is exhausted. Returns whether anything was added.
+    fn drain_resampler(&mut self) -> Result<bool, MediaError> {
+        if self.resampler_drained {
+            return Ok(false);
+        }
+        self.resampler_drained = true;
+        let Some((ctx, _)) = self.resampler.as_mut() else {
+            return Ok(false);
+        };
+        let mut out = frame::Audio::new(
+            format::Sample::F32(Type::Packed),
+            8192,
+            ChannelLayout::STEREO,
+        );
+        ctx.flush(&mut out)?;
+        let n = out.samples() * OUTPUT_CHANNELS;
+        self.buffer.extend(&out.plane::<f32>(0)[..n]);
+        Ok(n > 0)
+    }
+
     /// Decodes one more chunk into the buffer. Returns `false` at end of stream.
     fn fill(&mut self) -> Result<bool, MediaError> {
         loop {
@@ -128,7 +152,7 @@ impl AudioReader {
                 return Ok(true);
             }
             if self.eof {
-                return Ok(false);
+                return self.drain_resampler();
             }
             match self.input.packets().next() {
                 Some((stream, packet)) => {
