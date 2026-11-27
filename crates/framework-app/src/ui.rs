@@ -208,12 +208,12 @@ impl FrameworkApp {
                 None => self.perform(UiAction::SaveAs, ctx),
             },
             UiAction::SaveAs => {
-                if let Some(path) = self.save_file("project") {
+                if let Some(path) = self.save_project_file("project") {
                     self.save_project(&path, SaveMode::Reference);
                 }
             }
             UiAction::CollectAndSave => {
-                if let Some(path) = self.save_file("project-collected") {
+                if let Some(path) = self.save_project_file("project-collected") {
                     self.save_project(&path, SaveMode::Collect);
                 }
             }
@@ -235,7 +235,7 @@ impl FrameworkApp {
                 self.state.import(&files);
             }
             UiAction::ChooseExportPath => {
-                if let Some(path) = self.save_file("export.mp4") {
+                if let Some(path) = self.save_file("MP4 video", "mp4", "export") {
                     self.state.export_path = path.to_string_lossy().into_owned();
                 }
             }
@@ -269,15 +269,19 @@ impl FrameworkApp {
             .flatten()
     }
 
-    fn save_file(&self, stem: &str) -> Option<PathBuf> {
+    fn save_file(&self, filter: &str, ext: &str, stem: &str) -> Option<PathBuf> {
         self.use_dialogs
             .then(|| {
                 rfd::FileDialog::new()
-                    .add_filter("Framework project", &[PROJECT_EXTENSION])
-                    .set_file_name(format!("{stem}.{PROJECT_EXTENSION}"))
+                    .add_filter(filter, &[ext])
+                    .set_file_name(format!("{stem}.{ext}"))
                     .save_file()
             })
             .flatten()
+    }
+
+    fn save_project_file(&self, stem: &str) -> Option<PathBuf> {
+        self.save_file("Framework project", PROJECT_EXTENSION, stem)
             .map(|p| with_project_extension(&p))
     }
 
