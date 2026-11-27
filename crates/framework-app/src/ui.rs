@@ -406,21 +406,19 @@ impl FrameworkApp {
         egui::CentralPanel::no_frame()
             .frame(egui::Frame::new().fill(theme::BG))
             .show(ui, |ui| {
-                let avail = ui.available_size();
-                let aspect = 16.0 / 9.0;
-                let size = if avail.x / avail.y > aspect {
-                    Vec2::new(avail.y * aspect, avail.y)
-                } else {
-                    Vec2::new(avail.x, avail.x / aspect)
-                };
-                ui.centered_and_justified(|ui| match &self.preview_texture {
+                let rect = ui.available_rect_before_wrap();
+                match &self.preview_texture {
                     Some(tex) => {
-                        ui.add(egui::Image::new((tex.id(), size)));
+                        let size = fit_aspect(rect.size(), tex.size_vec2());
+                        let target = Rect::from_center_size(rect.center(), size);
+                        egui::Image::new((tex.id(), size)).paint_at(ui, target);
                     }
                     None => {
-                        ui.label(egui::RichText::new("No preview").color(theme::TEXT_DIM));
+                        ui.centered_and_justified(|ui| {
+                            ui.label(egui::RichText::new("No preview").color(theme::TEXT_DIM));
+                        });
                     }
-                });
+                }
             });
     }
 
@@ -653,6 +651,15 @@ fn planned_list(ui: &mut egui::Ui, items: &[(&str, &str)]) {
             .small()
             .color(theme::TEXT_DIM),
     );
+}
+
+/// Largest size with `content`'s aspect ratio that fits into `avail`.
+pub fn fit_aspect(avail: Vec2, content: Vec2) -> Vec2 {
+    if content.x <= 0.0 || content.y <= 0.0 || avail.x <= 0.0 || avail.y <= 0.0 {
+        return Vec2::ZERO;
+    }
+    let scale = (avail.x / content.x).min(avail.y / content.y);
+    content * scale
 }
 
 impl eframe::App for FrameworkApp {
@@ -923,6 +930,18 @@ mod tests {
         app.perform(UiAction::New, &ctx);
         assert!(app.state.project.media.is_empty());
         app.perform(UiAction::CancelExport, &ctx);
+    }
+
+    #[test]
+    fn preview_keeps_aspect_ratio() {
+        let hd = vec2(960.0, 540.0);
+        assert_eq!(fit_aspect(vec2(1000.0, 1000.0), hd), vec2(1000.0, 562.5));
+        assert_eq!(
+            fit_aspect(vec2(400.0, 100.0), hd),
+            vec2(100.0 * 16.0 / 9.0, 100.0)
+        );
+        assert_eq!(fit_aspect(vec2(0.0, 100.0), hd), Vec2::ZERO);
+        assert_eq!(fit_aspect(vec2(100.0, 100.0), Vec2::ZERO), Vec2::ZERO);
     }
 
     #[test]
