@@ -44,6 +44,14 @@ pub enum UiAction {
     ChooseExportPath,
     StartExport,
     CancelExport,
+    /// Closes the window (after the unsaved-changes check).
+    Quit,
+    /// Unsaved-changes prompt: drop the edits and run the pending action.
+    DiscardChanges,
+    /// Unsaved-changes prompt: save, then run the pending action.
+    SaveAndContinue,
+    /// Unsaved-changes prompt: keep editing.
+    CancelPending,
 }
 
 pub struct FrameworkApp {
@@ -56,6 +64,8 @@ pub struct FrameworkApp {
     pub export_window: bool,
     pub browser_tab: BrowserTab,
     pub actions: Vec<UiAction>,
+    /// Action waiting for the user to resolve unsaved changes.
+    pub pending: Option<UiAction>,
     /// When false, file dialogs are skipped (used by tests).
     pub use_dialogs: bool,
 }
@@ -76,6 +86,7 @@ impl FrameworkApp {
             export_window: false,
             browser_tab: BrowserTab::Media,
             actions: Vec::new(),
+            pending: None,
             use_dialogs: true,
         }
     }
@@ -106,7 +117,12 @@ impl FrameworkApp {
         self.timeline(ui);
         self.preview_panel(ui);
         self.export_dialog(&ctx);
+        self.unsaved_dialog(&ctx);
         self.handle_shortcuts(&ctx);
+        if ctx.input(|i| i.viewport().close_requested()) && self.state.dirty {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.pending = Some(UiAction::Quit);
+        }
         let actions = std::mem::take(&mut self.actions);
         for action in actions {
             self.perform(action, &ctx);
@@ -147,7 +163,25 @@ impl FrameworkApp {
     }
 
     pub fn perform(&mut self, action: UiAction, ctx: &egui::Context) {
+        if matches!(action, UiAction::New | UiAction::Open | UiAction::Quit) && self.state.dirty {
+            self.pending = Some(action);
+            return;
+        }
         match action {
+            UiAction::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            UiAction::DiscardChanges => {
+                if let Some(next) = self.pending.take() {
+                    self.state.dirty = false;
+                    self.perform(next, ctx);
+                }
+            }
+            UiAction::SaveAndContinue => {
+                self.perform(UiAction::Save, ctx);
+                if !self.state.dirty {
+                    self.perform(UiAction::DiscardChanges, ctx);
+                }
+            }
+            UiAction::CancelPending => self.pending = None,
             UiAction::New => {
                 self.state = EditorState::default();
                 self.touch();
@@ -519,6 +553,30 @@ impl FrameworkApp {
         }
     }
 
+    fn unsaved_dialog(&mut self, ctx: &egui::Context) {
+        if self.pending.is_none() {
+            return;
+        }
+        egui::Window::new("Unsaved changes")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label("The project has unsaved changes.");
+                ui.horizontal(|ui| {
+                    for (label, action) in [
+                        ("Save", UiAction::SaveAndContinue),
+                        ("Discard", UiAction::DiscardChanges),
+                        ("Cancel", UiAction::CancelPending),
+                    ] {
+                        if ui.button(label).clicked() {
+                            self.actions.push(action);
+                        }
+                    }
+                });
+            });
+    }
+
     fn export_dialog(&mut self, ctx: &egui::Context) {
         let mut open = self.export_window;
         egui::Window::new("Export")
@@ -852,9 +910,57 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
+        app.state.dirty = false;
         app.perform(UiAction::New, &ctx);
         assert!(app.state.project.media.is_empty());
         app.perform(UiAction::CancelExport, &ctx);
+    }
+
+    #[test]
+    fn unsaved_changes_prompt_before_discarding() {
+        let (ctx, mut app) = app_with_project();
+        app.state.dirty = true;
+
+        app.perform(UiAction::New, &ctx);
+        assert_eq!(app.pending, Some(UiAction::New));
+        assert!(!app.state.project.media.is_empty());
+        frame(&mut app, &ctx, vec![]);
+        app.perform(UiAction::CancelPending, &ctx);
+        assert_eq!(app.pending, None);
+        assert!(!app.state.project.media.is_empty());
+
+        app.perform(UiAction::New, &ctx);
+        app.perform(UiAction::DiscardChanges, &ctx);
+        assert_eq!(app.pending, None);
+        assert!(app.state.project.media.is_empty());
+
+        // Save & continue writes the project before running the action.
+        let (ctx, mut app) = app_with_project();
+        let path = app.state.project_path.clone().unwrap();
+        app.state.dirty = true;
+        app.perform(UiAction::Open, &ctx);
+        assert_eq!(app.pending, Some(UiAction::Open));
+        app.perform(UiAction::SaveAndContinue, &ctx);
+        assert!(path.exists());
+        assert_eq!(app.pending, None);
+        assert!(!app.state.dirty);
+
+        // Closing the window with edits asks first; without edits it closes.
+        app.state.dirty = true;
+        let mut raw = input(vec![]);
+        raw.viewports.insert(
+            egui::ViewportId::ROOT,
+            egui::ViewportInfo {
+                events: vec![egui::ViewportEvent::Close],
+                ..Default::default()
+            },
+        );
+        let mut out = ctx.run_ui(raw, |ui| app.ui(ui));
+        out.textures_delta.clear();
+        assert_eq!(app.pending, Some(UiAction::Quit));
+        app.perform(UiAction::DiscardChanges, &ctx);
+        assert_eq!(app.pending, None);
+        app.perform(UiAction::DiscardChanges, &ctx);
     }
 
     #[test]
