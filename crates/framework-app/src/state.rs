@@ -197,6 +197,12 @@ impl EditorState {
 
     /// Saves to `path`; [`SaveMode::Collect`] embeds all media into the file.
     pub fn save_to(&mut self, path: &Path, mode: SaveMode) -> bool {
+        if mode == SaveMode::Collect
+            && let Err(e) = framework_media::check_collectable(&self.project)
+        {
+            self.status = format!("Collect failed: {e}");
+            return false;
+        }
         match self.project.save_as(path, mode) {
             Ok(()) => {
                 self.project_path = Some(path.to_owned());
@@ -286,6 +292,18 @@ mod tests {
         assert!(!other.open(&tmp("nope.json")));
         assert!(other.status.starts_with("Open failed"));
         assert!(!other.save_to(&tmp("no/such/dir/x.fwk"), SaveMode::Reference));
+
+        // Collecting refuses files that are not the recorded kind of media.
+        let mut bad = EditorState::new(s.project.clone());
+        bad.project.media[0].info.kind = MediaKind::Audio;
+        assert!(!bad.save_to(&tmp("bad.fwk"), SaveMode::Collect));
+        assert!(bad.status.contains("not the kind"), "{}", bad.status);
+        let secret = tmp("secret.txt");
+        std::fs::write(&secret, "private key").unwrap();
+        bad.project.media[0].path = secret;
+        assert!(!bad.save_to(&tmp("bad.fwk"), SaveMode::Collect));
+        assert!(bad.status.starts_with("Collect failed"));
+        assert!(!tmp("bad.fwk").exists());
     }
 
     #[test]

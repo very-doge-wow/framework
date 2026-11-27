@@ -15,7 +15,7 @@ pub use audio::AudioReader;
 pub use error::MediaError;
 pub use export::{ExportProgress, export};
 pub use preview::{PreviewRenderer, RgbaImage};
-pub use probe::probe;
+pub use probe::{check_collectable, probe};
 pub use video::VideoReader;
 
 use std::sync::Once;

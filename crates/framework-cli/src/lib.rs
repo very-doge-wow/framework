@@ -149,6 +149,7 @@ pub fn run(cli: Cli, out: &mut impl Write) -> Result<()> {
         }
         Command::Collect { project, output } => {
             let mut project = Project::load(&project)?;
+            framework_media::check_collectable(&project)?;
             project.save_as(&output, SaveMode::Collect)?;
             writeln!(out, "wrote {} with embedded media", output.display())?;
         }

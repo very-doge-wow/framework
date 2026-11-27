@@ -15,6 +15,8 @@ pub enum MediaError {
     NoVideo(PathBuf),
     #[error("{0}: no audio stream")]
     NoAudio(PathBuf),
+    #[error("{0}: not the kind of media the project expects")]
+    UnexpectedKind(PathBuf),
     #[error("encoder '{0}' is not available in this FFmpeg build")]
     MissingEncoder(&'static str),
     #[error("the timeline is empty")]
