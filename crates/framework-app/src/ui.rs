@@ -835,7 +835,10 @@ pub fn fit_aspect(avail: Vec2, content: Vec2) -> Vec2 {
 
 /// Appends `.fwk` unless the path already ends in it.
 pub fn with_project_extension(path: &std::path::Path) -> PathBuf {
-    if path.extension().is_some_and(|e| e == PROJECT_EXTENSION) {
+    if path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case(PROJECT_EXTENSION))
+    {
         path.to_owned()
     } else {
         let mut p = path.as_os_str().to_owned();
@@ -1068,6 +1071,10 @@ mod tests {
         assert_eq!(
             with_project_extension(Path::new("a/b.fwk")),
             Path::new("a/b.fwk")
+        );
+        assert_eq!(
+            with_project_extension(Path::new("a/b.FWK")),
+            Path::new("a/b.FWK")
         );
         assert_eq!(
             with_project_extension(Path::new("b.json")),
