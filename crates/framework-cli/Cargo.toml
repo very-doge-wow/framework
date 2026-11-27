@@ -1,0 +1,20 @@
+[package]
+name = "framework-cli"
+description = "Command-line interface for Framework (probe, project creation, export)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "framework-cli"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+framework-core.workspace = true
+framework-media.workspace = true
+serde_json.workspace = true

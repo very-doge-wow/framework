@@ -1,0 +1,22 @@
+[package]
+name = "framework-app"
+description = "Framework desktop video editor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "framework"
+path = "src/main.rs"
+
+[dependencies]
+eframe.workspace = true
+egui.workspace = true
+framework-core.workspace = true
+framework-media.workspace = true
+rfd.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "framework",
+  "version-string": "0.1.0",
+  "builtin-baseline": "99541cc939bf01ae3c42f928266d648f5acb88fd",
+  "dependencies": [
+    {
+      "name": "ffmpeg",
+      "default-features": false,
+      "features": ["avcodec", "avformat", "avfilter", "swresample", "swscale", "gpl", "x264", "zlib"]
+    }
+  ]
+}
