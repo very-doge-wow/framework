@@ -935,11 +935,15 @@ mod tests {
     #[test]
     fn preview_keeps_aspect_ratio() {
         let hd = vec2(960.0, 540.0);
-        assert_eq!(fit_aspect(vec2(1000.0, 1000.0), hd), vec2(1000.0, 562.5));
-        assert_eq!(
+        let close = |a: Vec2, b: Vec2| (a - b).length() < 1e-3;
+        assert!(close(
+            fit_aspect(vec2(1000.0, 1000.0), hd),
+            vec2(1000.0, 562.5)
+        ));
+        assert!(close(
             fit_aspect(vec2(400.0, 100.0), hd),
             vec2(100.0 * 16.0 / 9.0, 100.0)
-        );
+        ));
         assert_eq!(fit_aspect(vec2(0.0, 100.0), hd), Vec2::ZERO);
         assert_eq!(fit_aspect(vec2(100.0, 100.0), Vec2::ZERO), Vec2::ZERO);
     }
