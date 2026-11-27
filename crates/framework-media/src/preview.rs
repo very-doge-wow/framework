@@ -49,8 +49,9 @@ impl PreviewRenderer {
                         asset.kind() == MediaKind::Image,
                     )?),
                 };
+                let turns = reader.quarter_turns();
                 match reader.frame_at(clip.source_time(t))? {
-                    Some(src) => self.fitter.fit(src)?,
+                    Some(src) => self.fitter.fit(src, turns)?,
                     None => self.fitter.black(),
                 }
             }

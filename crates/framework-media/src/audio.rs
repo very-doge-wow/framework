@@ -39,11 +39,7 @@ impl AudioReader {
             .ok_or_else(|| MediaError::NoAudio(path.to_owned()))?;
         let stream_index = stream.index();
         let tb = stream.time_base();
-        let start_pts = if stream.start_time() == ffmpeg_next::ffi::AV_NOPTS_VALUE {
-            0
-        } else {
-            stream.start_time()
-        };
+        let start_pts = crate::video::reference_start(&input, &stream);
         let decoder = codec::context::Context::from_parameters(stream.parameters())?
             .decoder()
             .audio()?;

@@ -353,8 +353,9 @@ fn render(
                         asset.kind() == MediaKind::Image,
                     )?),
                 };
+                let turns = reader.quarter_turns();
                 match reader.frame_at(clip.source_time(t))? {
-                    Some(src) => fitter.fit(src)?,
+                    Some(src) => fitter.fit(src, turns)?,
                     None => fitter.black(),
                 }
             }
