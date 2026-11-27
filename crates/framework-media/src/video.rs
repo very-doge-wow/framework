@@ -231,6 +231,7 @@ pub(crate) fn reference_start(
 
 /// Orientation from the stream's display matrix (phone footage).
 /// The stream's sample (pixel) aspect ratio; 1.0 when unknown or invalid.
+/// Like FFmpeg's `av_guess_sample_aspect_ratio`, a container override wins over the coded value.
 pub(crate) fn sample_aspect(stream: &format::stream::Stream) -> f64 {
     // SAFETY: the stream and its codec parameters are valid while `stream` is borrowed.
     let (codec, container) = unsafe {
@@ -240,8 +241,8 @@ pub(crate) fn sample_aspect(stream: &format::stream::Stream) -> f64 {
             (*st).sample_aspect_ratio,
         )
     };
-    aspect_or_square(codec.num, codec.den)
-        .or_else(|| aspect_or_square(container.num, container.den))
+    aspect_or_square(container.num, container.den)
+        .or_else(|| aspect_or_square(codec.num, codec.den))
         .unwrap_or(1.0)
 }
 
@@ -337,17 +338,17 @@ impl Fitter {
     }
 
     /// Size and even-aligned offset of a `src_w`×`src_h` picture fitted into the canvas.
-    pub(crate) fn fit_rect(&self, src_w: u32, src_h: u32) -> (u32, u32, u32, u32) {
-        if src_w == 0 || src_h == 0 {
+    pub(crate) fn fit_rect(&self, src_w: f64, src_h: f64) -> (u32, u32, u32, u32) {
+        if src_w <= 0.0 || src_h <= 0.0 || !src_w.is_finite() || !src_h.is_finite() {
             return (self.width, self.height, 0, 0);
         }
         let scale = f64::min(
-            f64::from(self.width) / f64::from(src_w),
-            f64::from(self.height) / f64::from(src_h),
+            f64::from(self.width) / src_w,
+            f64::from(self.height) / src_h,
         );
         let even = |v: f64| ((v.round() as u32) & !1).max(2);
-        let w = even(f64::from(src_w) * scale).min(self.width);
-        let h = even(f64::from(src_h) * scale).min(self.height);
+        let w = even(src_w * scale).min(self.width);
+        let h = even(src_h * scale).min(self.height);
         let x = ((self.width - w) / 2) & !1;
         let y = ((self.height - h) / 2) & !1;
         (w, h, x, y)
@@ -370,11 +371,11 @@ impl Fitter {
     ) -> Result<frame::Video, MediaError> {
         let turns = o.quarter_turns % 4;
         let sideways = turns % 2 == 1;
-        let display_w = (f64::from(src.width()) * pixel_aspect).round().max(1.0) as u32;
+        let display_w = f64::from(src.width()) * pixel_aspect;
         let (sw, sh) = if sideways {
-            (src.height(), display_w)
+            (f64::from(src.height()), display_w)
         } else {
-            (display_w, src.height())
+            (display_w, f64::from(src.height()))
         };
         let (w, h, x, y) = self.fit_rect(sw, sh);
         let (scale_w, scale_h) = if sideways { (h, w) } else { (w, h) };
@@ -601,6 +602,10 @@ mod tests {
         let out = fitter.fit(&src, turns(0), 2.0).unwrap();
         assert_ne!(red(&out, 0, 2), 0);
         assert_ne!(red(&out, 7, 2), 0);
+        // 720×480 with 32:27 pixels is exactly 16:9: no black columns at 1080p.
+        let hd = Fitter::new(format::Pixel::RGBA, 1920, 1080);
+        assert_eq!(hd.fit_rect(720.0 * 32.0 / 27.0, 480.0), (1920, 1080, 0, 0));
+        assert_eq!(hd.fit_rect(0.0, 480.0), (1920, 1080, 0, 0));
         assert_eq!(aspect_or_square(4, 3), Some(4.0 / 3.0));
         assert_eq!(aspect_or_square(0, 1), None);
         assert_eq!(aspect_or_square(1, 0), None);
