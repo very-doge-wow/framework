@@ -27,17 +27,23 @@ pub enum SaveMode {
 }
 
 impl Project {
+    /// Whether `path` is a project container rather than legacy plain JSON,
+    /// judged by content because a legacy file may carry any extension.
+    pub fn is_container(path: impl AsRef<Path>) -> bool {
+        let mut magic = [0u8; 2];
+        File::open(path)
+            .and_then(|mut f| f.read_exact(&mut magic))
+            .is_ok()
+            && &magic == b"PK"
+    }
+
     /// Loads a `.fwk` container, or a legacy plain-JSON project.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, ProjectError> {
         let path = path.as_ref();
-        let mut file = File::open(path)?;
-        let mut magic = [0u8; 2];
-        let is_zip = file.read_exact(&mut magic).is_ok() && &magic == b"PK";
-        if !is_zip {
+        if !Self::is_container(path) {
             return Self::from_json(&fs::read_to_string(path)?);
         }
-        file.seek(SeekFrom::Start(0))?;
-        let mut archive = ZipArchive::new(BufReader::new(file))?;
+        let mut archive = ZipArchive::new(BufReader::new(File::open(path)?))?;
         let mut json = String::new();
         archive.by_name(PROJECT_ENTRY)?.read_to_string(&mut json)?;
         let mut project = Self::from_json(&json)?;

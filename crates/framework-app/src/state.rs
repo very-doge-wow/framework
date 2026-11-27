@@ -227,10 +227,10 @@ impl EditorState {
         match Project::load(path) {
             Ok(project) => {
                 *self = Self::new(project);
-                if path
+                let ext_ok = path
                     .extension()
-                    .is_some_and(|e| e.eq_ignore_ascii_case(framework_core::PROJECT_EXTENSION))
-                {
+                    .is_some_and(|e| e.eq_ignore_ascii_case(framework_core::PROJECT_EXTENSION));
+                if ext_ok && Project::is_container(path) {
                     self.project_path = Some(path.to_owned());
                     self.status = format!("Opened {}", path.display());
                 } else {
@@ -289,6 +289,10 @@ mod tests {
         std::fs::copy(&path, &upper).unwrap();
         assert!(other.open(&upper));
         assert_eq!(other.project_path.as_deref(), Some(upper.as_path()));
+        let disguised = tmp("disguised.fwk");
+        std::fs::write(&disguised, other.project.to_json().unwrap()).unwrap();
+        assert!(other.open(&disguised));
+        assert_eq!(other.project_path, None);
         let legacy = tmp("legacy.json");
         std::fs::write(&legacy, s.project.to_json().unwrap()).unwrap();
         assert!(other.open(&legacy));
