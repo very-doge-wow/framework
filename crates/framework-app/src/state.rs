@@ -83,7 +83,8 @@ impl EditorState {
         for path in paths {
             match framework_media::probe(path) {
                 Ok(info) => {
-                    let id = self.project.add_media(MediaAsset::new(path.clone(), info));
+                    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+                    let id = self.project.add_media(MediaAsset::new(path, info));
                     self.selected_media = Some(id);
                     imported += 1;
                 }
