@@ -1,0 +1,16 @@
+[package]
+name = "framework-media"
+description = "FFmpeg-based media probing, decoding and rendering for Framework"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+ffmpeg-next.workspace = true
+framework-core.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
