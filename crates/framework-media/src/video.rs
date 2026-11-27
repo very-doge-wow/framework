@@ -63,6 +63,7 @@ pub struct VideoReader {
     eof: bool,
     started: bool,
     orientation: Orientation,
+    pixel_aspect: f64,
 }
 
 impl VideoReader {
@@ -81,6 +82,7 @@ impl VideoReader {
         let tb = stream.time_base();
         let start_pts = reference_start(&input, &stream);
         let orientation = display_orientation(&stream);
+        let pixel_aspect = sample_aspect(&stream);
         let mut ctx = codec::context::Context::from_parameters(stream.parameters())?;
         ctx.set_threading(threading::Config::kind(threading::Type::Frame));
         let decoder = ctx.decoder().video()?;
@@ -96,6 +98,7 @@ impl VideoReader {
             eof: false,
             started: false,
             orientation,
+            pixel_aspect,
         })
     }
 
@@ -110,6 +113,11 @@ impl VideoReader {
     /// Turns/flips needed to show the frames upright (display matrix).
     pub fn orientation(&self) -> Orientation {
         self.orientation
+    }
+
+    /// Width of one stored pixel relative to its height (e.g. 4/3 for 1440×1080 HDV).
+    pub fn pixel_aspect(&self) -> f64 {
+        self.pixel_aspect
     }
 
     fn pts_to_time(&self, pts: i64) -> Time {
@@ -222,6 +230,25 @@ pub(crate) fn reference_start(
 }
 
 /// Orientation from the stream's display matrix (phone footage).
+/// The stream's sample (pixel) aspect ratio; 1.0 when unknown or invalid.
+pub(crate) fn sample_aspect(stream: &format::stream::Stream) -> f64 {
+    // SAFETY: the stream and its codec parameters are valid while `stream` is borrowed.
+    let (codec, container) = unsafe {
+        let st = stream.as_ptr();
+        (
+            (*(*st).codecpar).sample_aspect_ratio,
+            (*st).sample_aspect_ratio,
+        )
+    };
+    aspect_or_square(codec.num, codec.den)
+        .or_else(|| aspect_or_square(container.num, container.den))
+        .unwrap_or(1.0)
+}
+
+fn aspect_or_square(num: i32, den: i32) -> Option<f64> {
+    (num > 0 && den > 0).then(|| f64::from(num) / f64::from(den))
+}
+
 pub(crate) fn display_orientation(stream: &format::stream::Stream) -> Orientation {
     use ffmpeg_next::ffi;
     // SAFETY: the stream and its codec parameters are valid while `stream` is borrowed;
@@ -287,8 +314,8 @@ fn orient(src: &frame::Video, o: Orientation) -> frame::Video {
     dst
 }
 
-/// Source format, width, height and quarter turns a cached scaler was built for.
-type ScalerKey = (format::Pixel, u32, u32, u32);
+/// Source format, width, height and scaled width/height a cached scaler was built for.
+type ScalerKey = (format::Pixel, u32, u32, u32, u32);
 
 /// Fits frames of arbitrary size and format into a fixed-size canvas,
 /// preserving aspect ratio (letterboxing / pillarboxing).
@@ -333,22 +360,25 @@ impl Fitter {
         canvas
     }
 
-    /// Renders `src`, oriented by `o`, letterboxed into a fresh canvas.
+    /// Renders `src` with non-square pixels of width `pixel_aspect`, oriented by `o`,
+    /// letterboxed into a fresh canvas.
     pub(crate) fn fit(
         &mut self,
         src: &frame::Video,
         o: Orientation,
+        pixel_aspect: f64,
     ) -> Result<frame::Video, MediaError> {
         let turns = o.quarter_turns % 4;
         let sideways = turns % 2 == 1;
+        let display_w = (f64::from(src.width()) * pixel_aspect).round().max(1.0) as u32;
         let (sw, sh) = if sideways {
-            (src.height(), src.width())
+            (src.height(), display_w)
         } else {
-            (src.width(), src.height())
+            (display_w, src.height())
         };
         let (w, h, x, y) = self.fit_rect(sw, sh);
         let (scale_w, scale_h) = if sideways { (h, w) } else { (w, h) };
-        let key = (src.format(), src.width(), src.height(), turns);
+        let key = (src.format(), src.width(), src.height(), scale_w, scale_h);
         if self.scaler.as_ref().is_none_or(|(k, _, _)| *k != key) {
             let ctx = scaling::Context::get(
                 src.format(),
@@ -548,14 +578,32 @@ mod tests {
     fn fit_applies_rotation_before_letterboxing() {
         let mut fitter = Fitter::new(format::Pixel::RGBA, 8, 8);
         // A wide 4×2 picture turned sideways becomes tall: pillarboxed at x = 2..6.
-        let out = fitter.fit(&rgba(4, 2), turns(1)).unwrap();
+        let out = fitter.fit(&rgba(4, 2), turns(1), 1.0).unwrap();
         assert_eq!((out.width(), out.height()), (8, 8));
         assert_eq!(red(&out, 0, 4), 0);
         assert_ne!(red(&out, 4, 4), 0);
         // Unrotated, the same picture is letterboxed instead.
-        let out = fitter.fit(&rgba(4, 2), turns(0)).unwrap();
+        let out = fitter.fit(&rgba(4, 2), turns(0), 1.0).unwrap();
         assert_eq!(red(&out, 4, 0), 0);
         assert_ne!(red(&out, 4, 4), 0);
+    }
+
+    #[test]
+    fn fit_applies_pixel_aspect() {
+        let mut fitter = Fitter::new(format::Pixel::RGBA, 8, 4);
+        let mut src = rgba(2, 2);
+        for px in src.data_mut(0).as_chunks_mut::<4>().0 {
+            px.copy_from_slice(&[200, 0, 0, 255]);
+        }
+        // 2×2 stored pixels: square shows pillarboxed, 2:1 pixels fill the 8×4 canvas.
+        let out = fitter.fit(&src, turns(0), 1.0).unwrap();
+        assert_eq!(red(&out, 0, 2), 0);
+        let out = fitter.fit(&src, turns(0), 2.0).unwrap();
+        assert_ne!(red(&out, 0, 2), 0);
+        assert_ne!(red(&out, 7, 2), 0);
+        assert_eq!(aspect_or_square(4, 3), Some(4.0 / 3.0));
+        assert_eq!(aspect_or_square(0, 1), None);
+        assert_eq!(aspect_or_square(1, 0), None);
     }
 
     #[test]
@@ -566,6 +614,7 @@ mod tests {
         crate::synthetic::write_test_video(&path, (32, 18), 10, 5, true).unwrap();
         let reader = VideoReader::open(&path, false).unwrap();
         assert_eq!(reader.orientation(), Orientation::default());
+        assert_eq!(reader.pixel_aspect(), 1.0);
         let input = format::input(&path).unwrap();
         for stream in input.streams() {
             assert!(reference_start(&input, &stream) <= stream.start_time().max(0));

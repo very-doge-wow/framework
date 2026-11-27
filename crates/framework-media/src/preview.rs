@@ -50,8 +50,9 @@ impl PreviewRenderer {
                     )?),
                 };
                 let orientation = reader.orientation();
+                let pixel_aspect = reader.pixel_aspect();
                 match reader.frame_at(clip.source_time(t))? {
-                    Some(src) => self.fitter.fit(src, orientation)?,
+                    Some(src) => self.fitter.fit(src, orientation, pixel_aspect)?,
                     None => self.fitter.black(),
                 }
             }

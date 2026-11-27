@@ -354,8 +354,9 @@ fn render(
                     )?),
                 };
                 let orientation = reader.orientation();
+                let pixel_aspect = reader.pixel_aspect();
                 match reader.frame_at(clip.source_time(t))? {
-                    Some(src) => fitter.fit(src, orientation)?,
+                    Some(src) => fitter.fit(src, orientation, pixel_aspect)?,
                     None => fitter.black(),
                 }
             }
