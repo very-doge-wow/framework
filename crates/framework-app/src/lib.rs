@@ -27,3 +27,14 @@ pub fn native_options() -> eframe::NativeOptions {
         ..Default::default()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn logging_and_window_options() {
+        super::init_logging();
+        super::init_logging();
+        let options = super::native_options();
+        assert!(matches!(options.renderer, eframe::Renderer::Wgpu));
+    }
+}

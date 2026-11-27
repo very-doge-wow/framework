@@ -230,6 +230,40 @@ mod tests {
     }
 
     #[test]
+    fn rational_helpers_and_degenerate_inputs() {
+        assert_eq!(Rational::new(30, 1).to_string(), "30");
+        assert_eq!(Rational::new(30000, 1001).to_string(), "29.970");
+        assert_eq!(Rational::new(1, 0).as_f64(), 0.0);
+        assert_eq!(
+            Rational::new(25, 1).frame_duration(),
+            Time::from_seconds(0.04)
+        );
+        assert_eq!(Time::from_frames(5, Rational::new(0, 1)), Time::ZERO);
+        assert_eq!(
+            Time::from_seconds(1.0).to_frames_floor(Rational::new(1, 0)),
+            0
+        );
+        assert_eq!(Time::from_timebase(5, 1, 0), Time::ZERO);
+        assert_eq!(Time::from_seconds(1.0).to_timebase(0, 1), 0);
+        assert_eq!(Time::from_samples(10, 0), Time::ZERO);
+        assert_eq!(Time::from_flicks(7).flicks(), 7);
+    }
+
+    #[test]
+    fn arithmetic_and_ordering() {
+        let mut t = Time::from_seconds(1.0);
+        t += Time::from_seconds(2.0);
+        assert_eq!(t, Time::from_seconds(3.0));
+        t -= Time::from_seconds(0.5);
+        assert_eq!(t, Time::from_seconds(2.5));
+        assert_eq!(t - Time::from_seconds(0.5), Time::from_seconds(2.0));
+        assert_eq!(Time::ZERO.max(t), t);
+        assert_eq!(Time::ZERO.min(t), Time::ZERO);
+        assert_eq!(t.max(Time::ZERO), t);
+        assert_eq!(t.min(Time::ZERO), Time::ZERO);
+    }
+
+    #[test]
     fn display() {
         assert_eq!(Time::from_seconds(3723.5).to_string(), "01:02:03.500");
         assert_eq!((-Time::from_seconds(1.25)).to_string(), "-00:00:01.250");
