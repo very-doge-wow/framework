@@ -57,9 +57,13 @@ impl Project {
         let mut tmp = path.as_os_str().to_owned();
         tmp.push(".tmp");
         let tmp = PathBuf::from(tmp);
-        let result = self.write_container(&tmp, mode);
-        if let Err(e) = result {
+        let embedded: Vec<_> = self.media.iter().map(|m| m.embedded.clone()).collect();
+        if let Err(e) = self.write_container(&tmp, mode) {
             let _ = fs::remove_file(&tmp);
+            // Assets collected before the failure are not in any container yet.
+            for (asset, entry) in self.media.iter_mut().zip(embedded) {
+                asset.embedded = entry;
+            }
             return Err(e);
         }
         fs::rename(&tmp, path)?;
@@ -238,6 +242,16 @@ mod tests {
         let out = d.join("missing.fwk");
         assert!(missing.save_as(&out, SaveMode::Collect).is_err());
         assert!(!d.join("missing.fwk.tmp").exists());
+
+        // A failed collection leaves already collected assets referenced.
+        let mut partial = project_with(&media);
+        let gone = d.join("gone.bin");
+        partial.add_media(MediaAsset::new(&gone, partial.media[0].info.clone()));
+        assert!(partial.save_as(&out, SaveMode::Collect).is_err());
+        assert!(partial.media.iter().all(|m| m.embedded.is_none()));
+        fs::write(&gone, b"back").unwrap();
+        partial.save_as(&out, SaveMode::Collect).unwrap();
+        assert!(partial.media.iter().all(|m| m.location.is_some()));
 
         // Embedded media without a container location cannot be saved.
         let mut broken = project_with(&media);
