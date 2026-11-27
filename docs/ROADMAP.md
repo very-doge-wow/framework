@@ -33,11 +33,12 @@ Effort is given in agent sessions (roughly one week of human engineering each).
 - [x] Built-in export profiles.
 - [x] Minimal desktop app shell: browser panel with Media pool / Effects / Generators tabs (the latter two list planned items), preview, timeline, export dialog.
 - [x] CI on Linux/macOS/Windows: fmt, clippy, tests, license check, packaged artifacts.
-- [x] Tag-triggered GitHub Release with per-OS packages and the matching FFmpeg/x264 source.
+- [x] semantic-release on `main` creates the `v*` tag and GitHub Release; per-OS packages and the matching FFmpeg/x264 source are attached.
 - [x] Everything pinned (toolchain, crates, vcpkg, actions by SHA, runner images); Renovate keeps it current.
 
 Acceptance: `framework-cli export` renders a multi-clip project to a playable MP4
-on all three platforms in CI; pushing a `v*` tag publishes a release.
+on all three platforms in CI; merging a releasable Conventional Commit to `main`
+publishes a tagged release.
 
 ## Phase 2 – Editor core (8–12 sessions)
 
