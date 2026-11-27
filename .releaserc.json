@@ -1,17 +1,34 @@
 {
-  "branches": ["main"],
+  "branches": [
+    "main"
+  ],
   "tagFormat": "v${version}",
   "plugins": [
-    ["@semantic-release/commit-analyzer", { "preset": "angular" }],
-    ["@semantic-release/release-notes-generator", { "preset": "angular" }],
+    [
+      "@semantic-release/commit-analyzer",
+      {
+        "preset": "angular"
+      }
+    ],
+    [
+      "@semantic-release/release-notes-generator",
+      {
+        "preset": "angular"
+      }
+    ],
     [
       "@semantic-release/github",
       {
-        "assets": [{ "path": "dist/*" }],
+        "assets": [
+          {
+            "path": "dist/*"
+          }
+        ],
         "successCommentCondition": false,
         "failCommentCondition": false,
         "releasedLabels": false
       }
-    ]
+    ],
+    "./scripts/release-version-output.mjs"
   ]
 }

@@ -34,11 +34,8 @@ jobs:
         id: version
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          npx --no-install semantic-release --dry-run | tee release-dry-run.log
-          version="$(sed -n 's/.*The next release version is \([^ ]*\).*/\1/p' release-dry-run.log | tail -n1)"
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "Next release: ${version:-none}"
+        # scripts/release-version-output.mjs writes `version` to $GITHUB_OUTPUT.
+        run: npx --no-install semantic-release --dry-run
 
   build:
     needs: version
