@@ -1,0 +1,886 @@
+use crate::state::EditorState;
+use crate::theme;
+use crate::worker::{ExportJob, ExportState, PreviewWorker};
+use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle, Vec2};
+use framework_core::{MediaKind, Time, TrackKind};
+use std::path::PathBuf;
+
+const TRACK_HEIGHT: f32 = 48.0;
+const HEADER_WIDTH: f32 = 72.0;
+const RULER_HEIGHT: f32 = 22.0;
+
+/// Tabs of the left-hand browser panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserTab {
+    Media,
+    Effects,
+    Generators,
+}
+
+/// Planned effects and generators shown (disabled) until their roadmap phase lands.
+pub const PLANNED_EFFECTS: &[(&str, &str)] = &[
+    ("Auto white balance", "Phase 4 · #9"),
+    ("Colour correction", "Phase 4 · #9"),
+    ("Transform / crop", "Phase 2 · #4"),
+    ("Opacity & blend", "Phase 2 · #4"),
+    ("Cross dissolve", "Phase 2 · #4"),
+    ("Emphasis zoom", "Phase 5 · #12"),
+];
+pub const PLANNED_GENERATORS: &[(&str, &str)] = &[
+    ("Text / title", "Phase 3 · #8"),
+    ("Lower third", "Phase 3 · #8"),
+    ("Solid colour", "Phase 2 · #20"),
+    ("Gradient", "Phase 2 · #20"),
+];
+
+/// Actions requested by the UI that need platform services (file dialogs).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UiAction {
+    New,
+    Open,
+    Save,
+    SaveAs,
+    Import,
+    ChooseExportPath,
+    StartExport,
+    CancelExport,
+}
+
+pub struct FrameworkApp {
+    pub state: EditorState,
+    preview: Option<PreviewWorker>,
+    preview_texture: Option<TextureHandle>,
+    preview_requested: Option<(Time, u64)>,
+    project_revision: u64,
+    export_job: Option<ExportJob>,
+    pub export_window: bool,
+    pub browser_tab: BrowserTab,
+    pub actions: Vec<UiAction>,
+    /// When false, file dialogs are skipped (used by tests).
+    pub use_dialogs: bool,
+}
+
+impl FrameworkApp {
+    pub fn new(ctx: &egui::Context) -> Self {
+        theme::apply(ctx);
+        let wake_ctx = ctx.clone();
+        Self {
+            state: EditorState::default(),
+            preview: Some(PreviewWorker::spawn(960, 540, move || {
+                wake_ctx.request_repaint()
+            })),
+            preview_texture: None,
+            preview_requested: None,
+            project_revision: 0,
+            export_job: None,
+            export_window: false,
+            browser_tab: BrowserTab::Media,
+            actions: Vec::new(),
+            use_dialogs: true,
+        }
+    }
+
+    /// Opens a project file (e.g. passed on the command line).
+    pub fn open_project(&mut self, path: &std::path::Path) -> bool {
+        let ok = self.state.open(path);
+        self.touch();
+        ok
+    }
+
+    /// Marks the project as changed so the preview is re-rendered.
+    pub fn touch(&mut self) {
+        self.project_revision += 1;
+    }
+
+    pub fn export_job(&self) -> Option<&ExportJob> {
+        self.export_job.as_ref()
+    }
+
+    /// Builds the whole UI for one frame.
+    pub fn ui(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        self.poll_preview(&ctx);
+        self.menu_bar(ui);
+        self.status_bar(ui);
+        self.media_bin(ui);
+        self.timeline(ui);
+        self.preview_panel(ui);
+        self.export_dialog(&ctx);
+        self.handle_shortcuts(&ctx);
+        let actions = std::mem::take(&mut self.actions);
+        for action in actions {
+            self.perform(action, &ctx);
+        }
+        self.request_preview();
+    }
+
+    fn request_preview(&mut self) {
+        let key = (self.state.playhead, self.project_revision);
+        if self.preview_requested != Some(key)
+            && let Some(worker) = &self.preview
+        {
+            worker.request(&self.state.project, self.state.playhead);
+            self.preview_requested = Some(key);
+        }
+    }
+
+    fn poll_preview(&mut self, ctx: &egui::Context) {
+        let Some(result) = self.preview.as_ref().and_then(PreviewWorker::poll) else {
+            return;
+        };
+        match result {
+            Ok(img) => {
+                let image = egui::ColorImage::from_rgba_unmultiplied(
+                    [img.width as usize, img.height as usize],
+                    &img.pixels,
+                );
+                match &mut self.preview_texture {
+                    Some(tex) => tex.set(image, egui::TextureOptions::LINEAR),
+                    None => {
+                        self.preview_texture =
+                            Some(ctx.load_texture("preview", image, egui::TextureOptions::LINEAR));
+                    }
+                }
+            }
+            Err(e) => self.state.status = format!("Preview error: {e}"),
+        }
+    }
+
+    pub fn perform(&mut self, action: UiAction, ctx: &egui::Context) {
+        match action {
+            UiAction::New => {
+                self.state = EditorState::default();
+                self.touch();
+            }
+            UiAction::Open => {
+                if let Some(path) = self.pick_file(&["json"]) {
+                    self.state.open(&path);
+                    self.touch();
+                }
+            }
+            UiAction::Save => match self.state.project_path.clone() {
+                Some(path) => {
+                    self.state.save_to(&path);
+                }
+                None => self.perform(UiAction::SaveAs, ctx),
+            },
+            UiAction::SaveAs => {
+                if let Some(path) = self.save_file("project.framework.json") {
+                    self.state.save_to(&path);
+                }
+            }
+            UiAction::Import => {
+                let files = if self.use_dialogs {
+                    rfd::FileDialog::new()
+                        .add_filter(
+                            "Media",
+                            &[
+                                "mp4", "mov", "mkv", "webm", "png", "jpg", "jpeg", "wav", "mp3",
+                                "m4a", "aac", "flac",
+                            ],
+                        )
+                        .pick_files()
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                self.state.import(&files);
+            }
+            UiAction::ChooseExportPath => {
+                if let Some(path) = self.save_file("export.mp4") {
+                    self.state.export_path = path.to_string_lossy().into_owned();
+                }
+            }
+            UiAction::StartExport => {
+                if self.export_job.as_ref().is_some_and(ExportJob::is_running) {
+                    return;
+                }
+                let wake = ctx.clone();
+                self.export_job = Some(ExportJob::start(
+                    self.state.project.clone(),
+                    self.state.selected_profile().clone(),
+                    PathBuf::from(&self.state.export_path),
+                    move || wake.request_repaint(),
+                ));
+            }
+            UiAction::CancelExport => {
+                if let Some(job) = &self.export_job {
+                    job.cancel();
+                }
+            }
+        }
+    }
+
+    fn pick_file(&self, ext: &[&str]) -> Option<PathBuf> {
+        self.use_dialogs
+            .then(|| {
+                rfd::FileDialog::new()
+                    .add_filter("Project", ext)
+                    .pick_file()
+            })
+            .flatten()
+    }
+
+    fn save_file(&self, default: &str) -> Option<PathBuf> {
+        self.use_dialogs
+            .then(|| rfd::FileDialog::new().set_file_name(default).save_file())
+            .flatten()
+    }
+
+    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        let fps = self.state.project.settings.frame_rate;
+        let step = fps.frame_duration();
+        ctx.input_mut(|i| {
+            if i.key_pressed(egui::Key::ArrowRight) {
+                self.state.set_playhead(self.state.playhead + step);
+            }
+            if i.key_pressed(egui::Key::ArrowLeft) {
+                self.state.set_playhead(self.state.playhead - step);
+            }
+            if i.key_pressed(egui::Key::Home) {
+                self.state.set_playhead(Time::ZERO);
+            }
+            if i.consume_key(egui::Modifiers::COMMAND, egui::Key::S) {
+                self.actions.push(UiAction::Save);
+            }
+            if i.consume_key(egui::Modifiers::COMMAND, egui::Key::I) {
+                self.actions.push(UiAction::Import);
+            }
+        });
+    }
+
+    fn menu_bar(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::top("menu").show(ui, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
+                ui.menu_button("File", |ui| {
+                    for (label, action) in [
+                        ("New project", UiAction::New),
+                        ("Open…", UiAction::Open),
+                        ("Save", UiAction::Save),
+                        ("Save as…", UiAction::SaveAs),
+                        ("Import media…", UiAction::Import),
+                    ] {
+                        if ui.button(label).clicked() {
+                            self.actions.push(action);
+                            ui.close();
+                        }
+                    }
+                });
+                ui.separator();
+                ui.label(egui::RichText::new(self.state.title()).color(theme::TEXT_DIM));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add(egui::Button::new("Export").fill(theme::ACCENT))
+                        .clicked()
+                    {
+                        self.export_window = true;
+                    }
+                });
+            });
+        });
+    }
+
+    fn status_bar(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::bottom("status").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(&self.state.status).color(theme::TEXT_DIM));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} / {}",
+                            self.state.playhead,
+                            self.state.project.duration()
+                        ))
+                        .monospace(),
+                    );
+                });
+            });
+        });
+    }
+
+    fn media_bin(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::left("browser")
+            .default_size(260.0)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for (tab, label) in [
+                        (BrowserTab::Media, "Media"),
+                        (BrowserTab::Effects, "Effects"),
+                        (BrowserTab::Generators, "Generators"),
+                    ] {
+                        ui.selectable_value(&mut self.browser_tab, tab, label);
+                    }
+                });
+                ui.separator();
+                match self.browser_tab {
+                    BrowserTab::Media => self.media_pool(ui),
+                    BrowserTab::Effects => planned_list(ui, PLANNED_EFFECTS),
+                    BrowserTab::Generators => planned_list(ui, PLANNED_GENERATORS),
+                }
+            });
+    }
+
+    fn media_pool(&mut self, ui: &mut egui::Ui) {
+        if ui.button("Import…").clicked() {
+            self.actions.push(UiAction::Import);
+        }
+        let mut add = false;
+        egui::ScrollArea::vertical()
+            .max_height(ui.available_height() - 40.0)
+            .show(ui, |ui| {
+                for asset in &self.state.project.media {
+                    let selected = self.state.selected_media == Some(asset.id);
+                    let detail = match (&asset.info.video, asset.info.duration) {
+                        (Some(v), Some(d)) => format!("{}×{} · {}", v.width, v.height, d),
+                        (Some(v), None) => format!("{}×{} · image", v.width, v.height),
+                        (None, Some(d)) => format!("audio · {d}"),
+                        (None, None) => String::new(),
+                    };
+                    let response = ui.selectable_label(
+                        selected,
+                        format!("{}\n{}", asset.display_name(), detail),
+                    );
+                    if response.clicked() {
+                        self.state.selected_media = Some(asset.id);
+                    }
+                    if response.double_clicked() {
+                        self.state.selected_media = Some(asset.id);
+                        add = true;
+                    }
+                }
+            });
+        ui.separator();
+        if ui
+            .add_enabled(
+                self.state.selected_media.is_some(),
+                egui::Button::new("Add to timeline"),
+            )
+            .clicked()
+        {
+            add = true;
+        }
+        if add && self.state.append_selected_media().is_some() {
+            self.touch();
+        }
+    }
+
+    fn preview_panel(&mut self, ui: &mut egui::Ui) {
+        egui::CentralPanel::no_frame()
+            .frame(egui::Frame::new().fill(theme::BG))
+            .show(ui, |ui| {
+                let avail = ui.available_size();
+                let aspect = 16.0 / 9.0;
+                let size = if avail.x / avail.y > aspect {
+                    Vec2::new(avail.y * aspect, avail.y)
+                } else {
+                    Vec2::new(avail.x, avail.x / aspect)
+                };
+                ui.centered_and_justified(|ui| match &self.preview_texture {
+                    Some(tex) => {
+                        ui.add(egui::Image::new((tex.id(), size)));
+                    }
+                    None => {
+                        ui.label(egui::RichText::new("No preview").color(theme::TEXT_DIM));
+                    }
+                });
+            });
+    }
+
+    fn timeline(&mut self, ui: &mut egui::Ui) {
+        let height = RULER_HEIGHT + TRACK_HEIGHT * self.state.project.tracks.len() as f32 + 16.0;
+        egui::Panel::bottom("timeline")
+            .exact_size(height.max(160.0))
+            .show(ui, |ui| {
+                let (rect, response) =
+                    ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+                self.timeline_input(ui, rect, &response);
+                self.paint_timeline(ui, rect);
+            });
+    }
+
+    fn timeline_input(&mut self, ui: &egui::Ui, rect: Rect, response: &egui::Response) {
+        let origin = rect.left() + HEADER_WIDTH;
+        if let Some(pos) = response.interact_pointer_pos()
+            && pos.x >= origin
+        {
+            self.state
+                .set_playhead(self.state.x_to_time(pos.x - origin));
+        }
+        if response.hovered() {
+            let (scroll, zoom) = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta()));
+            if zoom != 1.0 {
+                self.state.zoom_by(zoom);
+            }
+            if scroll.x != 0.0 || scroll.y != 0.0 {
+                let delta = -(scroll.x + scroll.y) / self.state.zoom;
+                self.state.scroll = (self.state.scroll + f64::from(delta)).max(0.0);
+            }
+        }
+    }
+
+    fn paint_timeline(&self, ui: &egui::Ui, rect: Rect) {
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 0.0, theme::BG);
+        let origin = rect.left() + HEADER_WIDTH;
+        let font = FontId::proportional(11.0);
+
+        // Ruler.
+        let step = self.state.ruler_step(80.0);
+        let first = (self.state.scroll / step).floor() as i64;
+        let mut i = first;
+        loop {
+            let t = Time::from_seconds(i as f64 * step);
+            let x = origin + self.state.time_to_x(t);
+            if x > rect.right() {
+                break;
+            }
+            if x >= origin {
+                painter.line_segment(
+                    [
+                        Pos2::new(x, rect.top()),
+                        Pos2::new(x, rect.top() + RULER_HEIGHT),
+                    ],
+                    Stroke::new(1.0, theme::TEXT_DIM),
+                );
+                painter.text(
+                    Pos2::new(x + 3.0, rect.top() + 2.0),
+                    Align2::LEFT_TOP,
+                    crate::state::ruler_label(t, step),
+                    font.clone(),
+                    theme::TEXT_DIM,
+                );
+            }
+            i += 1;
+        }
+
+        // Lanes, top lane = highest video track, like most editors.
+        let mut lanes: Vec<_> = self.state.project.tracks.iter().collect();
+        lanes.sort_by_key(|t| t.kind == TrackKind::Audio);
+        let video_count = lanes.iter().filter(|t| t.kind == TrackKind::Video).count();
+        lanes[..video_count].reverse();
+        for (row, track) in lanes.iter().enumerate() {
+            let top = rect.top() + RULER_HEIGHT + row as f32 * TRACK_HEIGHT;
+            let lane = Rect::from_min_size(
+                Pos2::new(rect.left(), top),
+                Vec2::new(rect.width(), TRACK_HEIGHT - 2.0),
+            );
+            painter.rect_filled(lane, 4.0, theme::LANE);
+            painter.text(
+                Pos2::new(rect.left() + 8.0, lane.center().y),
+                Align2::LEFT_CENTER,
+                &track.name,
+                FontId::proportional(13.0),
+                Color32::WHITE,
+            );
+            for clip in &track.clips {
+                let Some(asset) = self.state.project.media(clip.media) else {
+                    continue;
+                };
+                let x0 = origin + self.state.time_to_x(clip.start);
+                let x1 = origin + self.state.time_to_x(clip.end());
+                if x1 < origin || x0 > rect.right() {
+                    continue;
+                }
+                let r = Rect::from_min_max(
+                    Pos2::new(x0.max(origin), top + 3.0),
+                    Pos2::new(x1, top + TRACK_HEIGHT - 5.0),
+                );
+                let fill = match asset.kind() {
+                    MediaKind::Video => theme::VIDEO_CLIP,
+                    MediaKind::Image => theme::IMAGE_CLIP,
+                    MediaKind::Audio => theme::AUDIO_CLIP,
+                };
+                painter.rect_filled(r, 4.0, fill);
+                if self.state.selected_clip == Some(clip.id) {
+                    painter.rect_stroke(
+                        r,
+                        4.0,
+                        Stroke::new(2.0, Color32::WHITE),
+                        StrokeKind::Inside,
+                    );
+                }
+                painter.text(
+                    r.left_center() + Vec2::new(6.0, 0.0),
+                    Align2::LEFT_CENTER,
+                    asset.display_name(),
+                    font.clone(),
+                    Color32::WHITE,
+                );
+            }
+        }
+
+        // Playhead.
+        let x = origin + self.state.time_to_x(self.state.playhead);
+        if x >= origin && x <= rect.right() {
+            painter.line_segment(
+                [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
+                Stroke::new(2.0, theme::PLAYHEAD),
+            );
+        }
+    }
+
+    fn export_dialog(&mut self, ctx: &egui::Context) {
+        let mut open = self.export_window;
+        egui::Window::new("Export")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                egui::ComboBox::from_label("Profile")
+                    .selected_text(self.state.selected_profile().name.clone())
+                    .show_ui(ui, |ui| {
+                        for (i, p) in self.state.profiles.iter().enumerate() {
+                            ui.selectable_value(&mut self.state.export_profile, i, &p.name);
+                        }
+                    });
+                let p = self.state.selected_profile();
+                ui.label(format!(
+                    "{}×{} · {} fps · {} kbit/s · H.264/AAC MP4",
+                    p.video.width, p.video.height, p.video.frame_rate, p.video.bitrate_kbps
+                ));
+                ui.horizontal(|ui| {
+                    ui.text_edit_singleline(&mut self.state.export_path);
+                    if ui.button("Browse…").clicked() {
+                        self.actions.push(UiAction::ChooseExportPath);
+                    }
+                });
+                match self.export_job.as_ref().map(ExportJob::state) {
+                    Some(ExportState::Running(p)) => {
+                        ui.add(egui::ProgressBar::new(p.fraction()).show_percentage());
+                        if ui.button("Cancel").clicked() {
+                            self.actions.push(UiAction::CancelExport);
+                        }
+                    }
+                    other => {
+                        match other {
+                            Some(ExportState::Done(path)) => {
+                                ui.label(format!("Exported {}", path.display()));
+                            }
+                            Some(ExportState::Failed(e)) => {
+                                ui.colored_label(theme::PLAYHEAD, e);
+                            }
+                            _ => {}
+                        }
+                        if ui
+                            .add(egui::Button::new("Export").fill(theme::ACCENT))
+                            .clicked()
+                        {
+                            self.actions.push(UiAction::StartExport);
+                        }
+                    }
+                }
+            });
+        self.export_window = open;
+    }
+}
+
+fn planned_list(ui: &mut egui::Ui, items: &[(&str, &str)]) {
+    for (name, when) in items {
+        ui.add_enabled_ui(false, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(*name);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(egui::RichText::new(*when).small().color(theme::TEXT_DIM));
+                });
+            });
+        });
+    }
+    ui.add_space(8.0);
+    ui.label(
+        egui::RichText::new("Coming in later phases – see the roadmap.")
+            .small()
+            .color(theme::TEXT_DIM),
+    );
+}
+
+impl eframe::App for FrameworkApp {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        FrameworkApp::ui(self, ui);
+        ui.ctx()
+            .send_viewport_cmd(egui::ViewportCommand::Title(self.state.title()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::{Event, Modifiers, PointerButton, RawInput, Rect, pos2, vec2};
+    use framework_core::{MediaAsset, Project};
+
+    fn input(events: Vec<Event>) -> RawInput {
+        RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, 800.0))),
+            events,
+            ..Default::default()
+        }
+    }
+
+    fn frame(app: &mut FrameworkApp, ctx: &egui::Context, events: Vec<Event>) {
+        let mut out = ctx.run_ui(input(events), |ui| app.ui(ui));
+        out.textures_delta.clear();
+    }
+
+    fn key(key: egui::Key, modifiers: Modifiers) -> Event {
+        Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    fn click(pos: egui::Pos2) -> Vec<Event> {
+        vec![
+            Event::PointerMoved(pos),
+            Event::PointerButton {
+                pos,
+                button: PointerButton::Primary,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+            },
+            Event::PointerButton {
+                pos,
+                button: PointerButton::Primary,
+                pressed: false,
+                modifiers: Modifiers::NONE,
+            },
+        ]
+    }
+
+    fn test_dir() -> std::path::PathBuf {
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!("framework-app-ui-{}-{n}", std::process::id()))
+    }
+
+    fn app_with_project() -> (egui::Context, FrameworkApp) {
+        let dir = test_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let video = dir.join("ui.mp4");
+        let image = dir.join("ui.png");
+        let audio = dir.join("ui.wav");
+        framework_media::synthetic::write_test_video(&video, (64, 36), 10, 10, true).unwrap();
+        framework_media::synthetic::write_test_png(&image, (16, 16), [9, 9, 9]).unwrap();
+        framework_media::synthetic::write_test_wav(&audio, 8000, 1, 0.5, 100).unwrap();
+        let mut project = Project::new("ui");
+        for path in [&video, &image, &audio] {
+            let info = framework_media::probe(path).unwrap();
+            let kind = info.kind;
+            let id = project.add_media(MediaAsset::new(path.clone(), info));
+            let track = project.default_track_for(kind);
+            project.append_media(track, id).unwrap();
+        }
+        let ctx = egui::Context::default();
+        let mut app = FrameworkApp::new(&ctx);
+        app.use_dialogs = false;
+        app.state = EditorState::new(project);
+        app.state.export_path = dir.join("ui-export.mp4").to_string_lossy().into_owned();
+        app.state.project_path = Some(dir.join("project.framework.json"));
+        app.touch();
+        (ctx, app)
+    }
+
+    #[test]
+    fn renders_all_panels_and_receives_preview() {
+        let (ctx, mut app) = app_with_project();
+        app.state.selected_clip = Some(app.state.project.tracks[0].clips[0].id);
+        for _ in 0..200 {
+            frame(&mut app, &ctx, vec![]);
+            if app.preview_texture.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(app.preview_texture.is_some());
+        // A second preview result updates the existing texture.
+        app.state.set_playhead(Time::from_seconds(3.0));
+        for _ in 0..100 {
+            frame(&mut app, &ctx, vec![]);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        for tab in [
+            BrowserTab::Effects,
+            BrowserTab::Generators,
+            BrowserTab::Media,
+        ] {
+            app.browser_tab = tab;
+            frame(&mut app, &ctx, vec![]);
+        }
+        // Zoomed far out and scrolled: ruler/clip culling paths.
+        app.state.zoom = 2.0;
+        app.state.scroll = 0.5;
+        frame(&mut app, &ctx, vec![]);
+    }
+
+    #[test]
+    fn keyboard_shortcuts_move_playhead() {
+        let (ctx, mut app) = app_with_project();
+        frame(
+            &mut app,
+            &ctx,
+            vec![key(egui::Key::ArrowRight, Modifiers::NONE)],
+        );
+        assert_eq!(
+            app.state.playhead,
+            Time::from_frames(1, app.state.project.settings.frame_rate)
+        );
+        frame(
+            &mut app,
+            &ctx,
+            vec![key(egui::Key::ArrowRight, Modifiers::NONE)],
+        );
+        frame(
+            &mut app,
+            &ctx,
+            vec![key(egui::Key::ArrowLeft, Modifiers::NONE)],
+        );
+        assert_eq!(
+            app.state.playhead,
+            Time::from_frames(1, app.state.project.settings.frame_rate)
+        );
+        frame(&mut app, &ctx, vec![key(egui::Key::Home, Modifiers::NONE)]);
+        assert_eq!(app.state.playhead, Time::ZERO);
+        frame(&mut app, &ctx, vec![key(egui::Key::S, Modifiers::COMMAND)]);
+        assert!(
+            app.state.status.starts_with("Saved"),
+            "{}",
+            app.state.status
+        );
+        frame(&mut app, &ctx, vec![key(egui::Key::I, Modifiers::COMMAND)]);
+        assert_eq!(app.state.status, "Imported 0 file(s)");
+    }
+
+    #[test]
+    fn timeline_click_scroll_and_zoom() {
+        let (ctx, mut app) = app_with_project();
+        frame(&mut app, &ctx, vec![]);
+        // Click inside the timeline, right of the track headers.
+        frame(&mut app, &ctx, click(pos2(600.0, 760.0)));
+        assert!(app.state.playhead > Time::ZERO);
+        let zoom = app.state.zoom;
+        frame(
+            &mut app,
+            &ctx,
+            vec![Event::PointerMoved(pos2(600.0, 760.0)), Event::Zoom(2.0)],
+        );
+        assert!(app.state.zoom > zoom);
+        frame(
+            &mut app,
+            &ctx,
+            vec![
+                Event::PointerMoved(pos2(600.0, 760.0)),
+                Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: vec2(-400.0, 0.0),
+                    modifiers: Modifiers::NONE,
+                    phase: egui::TouchPhase::Move,
+                    source: egui::MouseWheelSource::Wheel,
+                },
+            ],
+        );
+        for _ in 0..30 {
+            frame(
+                &mut app,
+                &ctx,
+                vec![Event::PointerMoved(pos2(600.0, 760.0))],
+            );
+        }
+        assert!(app.state.scroll > 0.0);
+    }
+
+    #[test]
+    fn actions_open_save_export() {
+        let (ctx, mut app) = app_with_project();
+        let dir = app
+            .state
+            .project_path
+            .clone()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_owned();
+        let path = dir.join("saved.framework.json");
+        assert!(app.state.save_to(&path));
+        frame(&mut app, &ctx, vec![]);
+        for action in [
+            UiAction::Save,
+            UiAction::SaveAs,
+            UiAction::Open,
+            UiAction::Import,
+            UiAction::ChooseExportPath,
+        ] {
+            app.perform(action, &ctx);
+        }
+        assert!(app.open_project(&path));
+        assert!(!app.open_project(&dir.join("missing.json")));
+
+        app.export_window = true;
+        frame(&mut app, &ctx, vec![]);
+        app.perform(UiAction::StartExport, &ctx);
+        // A second start while running is ignored.
+        app.perform(UiAction::StartExport, &ctx);
+        frame(&mut app, &ctx, vec![]);
+        while app.export_job().is_some_and(ExportJob::is_running) {
+            frame(&mut app, &ctx, vec![]);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(matches!(
+            app.export_job().unwrap().state(),
+            ExportState::Done(_)
+        ));
+        frame(&mut app, &ctx, vec![]);
+
+        // Failure is shown in the dialog.
+        app.state.export_path = "/no/such/dir/x.mp4".into();
+        app.perform(UiAction::StartExport, &ctx);
+        while app.export_job().is_some_and(ExportJob::is_running) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        frame(&mut app, &ctx, vec![]);
+        assert!(matches!(
+            app.export_job().unwrap().state(),
+            ExportState::Failed(_)
+        ));
+
+        // Cancel a running export.
+        app.state.export_path = dir.join("cancel.mp4").to_string_lossy().into_owned();
+        app.perform(UiAction::StartExport, &ctx);
+        frame(&mut app, &ctx, vec![]);
+        app.perform(UiAction::CancelExport, &ctx);
+        while app.export_job().is_some_and(ExportJob::is_running) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        app.perform(UiAction::New, &ctx);
+        assert!(app.state.project.media.is_empty());
+        app.perform(UiAction::CancelExport, &ctx);
+    }
+
+    #[test]
+    fn preview_errors_are_reported() {
+        let (ctx, mut app) = app_with_project();
+        app.state.project.media[0].path = "/nope.mp4".into();
+        app.touch();
+        for _ in 0..200 {
+            frame(&mut app, &ctx, vec![]);
+            if app.state.status.starts_with("Preview error") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(app.state.status.starts_with("Preview error"));
+    }
+
+    #[test]
+    fn media_pool_add_to_timeline_button() {
+        let (ctx, mut app) = app_with_project();
+        app.state.selected_media = Some(app.state.project.media[0].id);
+        let before = app.state.project.tracks[0].clips.len();
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.state.append_selected_media().is_some());
+        app.touch();
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.state.project.tracks[0].clips.len(), before + 1);
+    }
+}
