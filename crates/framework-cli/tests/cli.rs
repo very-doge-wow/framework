@@ -46,7 +46,7 @@ fn new_info_probe_export_round_trip() {
     let image = d.join("in.png");
     framework_media::synthetic::write_test_video(&video, (64, 36), 10, 10, true).unwrap();
     framework_media::synthetic::write_test_png(&image, (16, 16), [1, 2, 3]).unwrap();
-    let project = d.join("p.framework.json");
+    let project = d.join("p.fwk");
     let p = project.to_str().unwrap();
 
     let probe = exec(&["probe", video.to_str().unwrap()]).unwrap();
@@ -66,12 +66,12 @@ fn new_info_probe_export_round_trip() {
     assert!(info.contains("V1 (Video): 2 clip(s)"));
 
     // Default name comes from the file stem.
-    let unnamed = d.join("unnamed.framework.json");
+    let unnamed = d.join("unnamed.fwk");
     exec(&["new", unnamed.to_str().unwrap()]).unwrap();
     assert!(
         exec(&["info", unnamed.to_str().unwrap()])
             .unwrap()
-            .starts_with("unnamed.framework:")
+            .starts_with("unnamed:")
     );
 
     let out = d.join("out.mp4");
@@ -100,6 +100,14 @@ fn new_info_probe_export_round_trip() {
     assert!(exec(&["probe", "/nope.mp4"]).is_err());
     assert!(exec(&["new", d.join("x.json").to_str().unwrap(), "/nope.mp4"]).is_err());
     assert!(exec(&["info", "/nope.json"]).is_err());
+
+    let collected = d.join("collected.fwk");
+    let msg = exec(&["collect", p, collected.to_str().unwrap()]).unwrap();
+    assert!(msg.contains("embedded media"));
+    std::fs::remove_file(&video).unwrap();
+    let info = exec(&["info", collected.to_str().unwrap()]).unwrap();
+    assert!(info.contains("V1 (Video): 2 clip(s)"));
+    assert!(exec(&["collect", p, d.join("no/dir/x.fwk").to_str().unwrap()]).is_err());
 }
 
 #[test]

@@ -1,8 +1,8 @@
-use crate::state::EditorState;
+use crate::state::{EditorState, MAX_ZOOM, MIN_ZOOM};
 use crate::theme;
 use crate::worker::{ExportJob, ExportState, PreviewWorker};
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle, Vec2};
-use framework_core::{MediaKind, Time, TrackKind};
+use framework_core::{MediaKind, PROJECT_EXTENSION, SaveMode, Time, TrackKind};
 use std::path::PathBuf;
 
 const TRACK_HEIGHT: f32 = 48.0;
@@ -40,6 +40,8 @@ pub enum UiAction {
     Open,
     Save,
     SaveAs,
+    /// Embeds all media into a new `.fwk` file.
+    CollectAndSave,
     Import,
     ChooseExportPath,
     StartExport,
@@ -64,6 +66,8 @@ pub struct FrameworkApp {
     pub export_window: bool,
     pub browser_tab: BrowserTab,
     pub actions: Vec<UiAction>,
+    /// Width of the timeline's time area in the last frame, for zoom steps and fitting.
+    timeline_width: f32,
     /// Action waiting for the user to resolve unsaved changes.
     pub pending: Option<UiAction>,
     /// When false, file dialogs are skipped (used by tests).
@@ -73,6 +77,8 @@ pub struct FrameworkApp {
 impl FrameworkApp {
     pub fn new(ctx: &egui::Context) -> Self {
         theme::apply(ctx);
+        // Cmd/Ctrl +/− zoom the timeline instead of the whole UI.
+        ctx.options_mut(|o| o.zoom_with_keyboard = false);
         let wake_ctx = ctx.clone();
         Self {
             state: EditorState::default(),
@@ -86,6 +92,7 @@ impl FrameworkApp {
             export_window: false,
             browser_tab: BrowserTab::Media,
             actions: Vec::new(),
+            timeline_width: 0.0,
             pending: None,
             use_dialogs: true,
         }
@@ -191,20 +198,23 @@ impl FrameworkApp {
                 self.touch();
             }
             UiAction::Open => {
-                if let Some(path) = self.pick_file(&["json"]) {
+                if let Some(path) = self.pick_file(&[PROJECT_EXTENSION, "json"]) {
                     self.state.open(&path);
                     self.touch();
                 }
             }
             UiAction::Save => match self.state.project_path.clone() {
-                Some(path) => {
-                    self.state.save_to(&path);
-                }
+                Some(path) => self.save_project(&path, SaveMode::Reference),
                 None => self.perform(UiAction::SaveAs, ctx),
             },
             UiAction::SaveAs => {
-                if let Some(path) = self.save_file("project.framework.json") {
-                    self.state.save_to(&path);
+                if let Some(path) = self.save_project_file("project") {
+                    self.save_project(&path, SaveMode::Reference);
+                }
+            }
+            UiAction::CollectAndSave => {
+                if let Some(path) = self.save_project_file("project-collected") {
+                    self.save_project(&path, SaveMode::Collect);
                 }
             }
             UiAction::Import => {
@@ -225,7 +235,7 @@ impl FrameworkApp {
                 self.state.import(&files);
             }
             UiAction::ChooseExportPath => {
-                if let Some(path) = self.save_file("export.mp4") {
+                if let Some(path) = self.save_file("MP4 video", "mp4", "export") {
                     self.state.export_path = path.to_string_lossy().into_owned();
                 }
             }
@@ -236,7 +246,7 @@ impl FrameworkApp {
                 let wake = ctx.clone();
                 self.export_job = Some(ExportJob::start(
                     self.state.project.clone(),
-                    self.state.selected_profile().clone(),
+                    encodable(self.state.selected_profile()),
                     PathBuf::from(&self.state.export_path),
                     move || wake.request_repaint(),
                 ));
@@ -259,10 +269,33 @@ impl FrameworkApp {
             .flatten()
     }
 
-    fn save_file(&self, default: &str) -> Option<PathBuf> {
+    fn save_file(&self, filter: &str, ext: &str, stem: &str) -> Option<PathBuf> {
         self.use_dialogs
-            .then(|| rfd::FileDialog::new().set_file_name(default).save_file())
+            .then(|| {
+                rfd::FileDialog::new()
+                    .add_filter(filter, &[ext])
+                    .set_file_name(format!("{stem}.{ext}"))
+                    .save_file()
+            })
             .flatten()
+    }
+
+    fn save_project_file(&mut self, stem: &str) -> Option<PathBuf> {
+        let chosen = self.save_file("Framework project", PROJECT_EXTENSION, stem)?;
+        project_save_target(&chosen)
+            .map_err(|e| self.state.status = e)
+            .ok()
+    }
+
+    /// Saves the project; the preview first closes its media files because
+    /// embedded media may live in the file being replaced.
+    pub fn save_project(&mut self, path: &std::path::Path, mode: SaveMode) {
+        if let Some(worker) = &self.preview {
+            worker.release_media();
+        }
+        self.state.save_to(path, mode);
+        self.preview_requested = None;
+        self.project_revision += 1;
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
@@ -284,6 +317,18 @@ impl FrameworkApp {
             if i.consume_key(egui::Modifiers::COMMAND, egui::Key::I) {
                 self.actions.push(UiAction::Import);
             }
+            // Cmd/Ctrl + and Cmd/Ctrl − zoom the timeline (egui's UI zoom is disabled).
+            for key in [egui::Key::Plus, egui::Key::Equals] {
+                if i.consume_key(egui::Modifiers::COMMAND, key) {
+                    self.state.zoom_step(true, self.timeline_width);
+                }
+            }
+            if i.consume_key(egui::Modifiers::COMMAND, egui::Key::Minus) {
+                self.state.zoom_step(false, self.timeline_width);
+            }
+            if i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num0) {
+                self.state.zoom_to_fit(self.timeline_width);
+            }
         });
     }
 
@@ -296,6 +341,7 @@ impl FrameworkApp {
                         ("Open…", UiAction::Open),
                         ("Save", UiAction::Save),
                         ("Save as…", UiAction::SaveAs),
+                        ("Collect and save…", UiAction::CollectAndSave),
                         ("Import media…", UiAction::Import),
                     ] {
                         if ui.button(label).clicked() {
@@ -338,7 +384,9 @@ impl FrameworkApp {
 
     fn media_bin(&mut self, ui: &mut egui::Ui) {
         egui::Panel::left("browser")
+            .resizable(true)
             .default_size(260.0)
+            .size_range(180.0..=640.0)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     for (tab, label) in [
@@ -423,10 +471,13 @@ impl FrameworkApp {
     }
 
     fn timeline(&mut self, ui: &mut egui::Ui) {
-        let height = RULER_HEIGHT + TRACK_HEIGHT * self.state.project.tracks.len() as f32 + 16.0;
+        let height = RULER_HEIGHT + TRACK_HEIGHT * self.state.project.tracks.len() as f32 + 48.0;
         egui::Panel::bottom("timeline")
-            .exact_size(height.max(160.0))
+            .resizable(true)
+            .default_size(height.max(200.0))
+            .size_range(120.0..=f32::INFINITY)
             .show(ui, |ui| {
+                self.timeline_toolbar(ui);
                 let (rect, response) =
                     ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
                 self.timeline_input(ui, rect, &response);
@@ -434,8 +485,42 @@ impl FrameworkApp {
             });
     }
 
+    fn timeline_toolbar(&mut self, ui: &mut egui::Ui) {
+        let cmd = if cfg!(target_os = "macos") {
+            "Cmd"
+        } else {
+            "Ctrl"
+        };
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Zoom").color(theme::TEXT_DIM));
+            let width = self.timeline_width;
+            if ui
+                .add_enabled(self.state.zoom > MIN_ZOOM, egui::Button::new("−"))
+                .on_hover_text(format!("Zoom out ({cmd} − or {cmd} + scroll)"))
+                .clicked()
+            {
+                self.state.zoom_step(false, width);
+            }
+            if ui
+                .add_enabled(self.state.zoom < MAX_ZOOM, egui::Button::new("+"))
+                .on_hover_text(format!("Zoom in ({cmd} + or {cmd} + scroll)"))
+                .clicked()
+            {
+                self.state.zoom_step(true, width);
+            }
+            if ui
+                .button("Fit")
+                .on_hover_text(format!("Show the whole project ({cmd} 0)"))
+                .clicked()
+            {
+                self.state.zoom_to_fit(width);
+            }
+        });
+    }
+
     fn timeline_input(&mut self, ui: &egui::Ui, rect: Rect, response: &egui::Response) {
         let origin = rect.left() + HEADER_WIDTH;
+        self.timeline_width = (rect.right() - origin).max(0.0);
         if let Some(pos) = response.interact_pointer_pos()
             && pos.x >= origin
         {
@@ -443,9 +528,12 @@ impl FrameworkApp {
                 .set_playhead(self.state.x_to_time(pos.x - origin));
         }
         if response.hovered() {
-            let (scroll, zoom) = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta()));
+            // Cmd/Ctrl + wheel and pinch arrive as zoom_delta.
+            let (scroll, zoom, pointer) =
+                ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta(), i.pointer.hover_pos()));
             if zoom != 1.0 {
-                self.state.zoom_by(zoom);
+                let x = pointer.map_or(0.0, |p| (p.x - origin).max(0.0));
+                self.state.zoom_around(zoom, x);
             }
             if scroll.x != 0.0 || scroll.y != 0.0 {
                 let delta = -(scroll.x + scroll.y) / self.state.zoom;
@@ -586,18 +674,27 @@ impl FrameworkApp {
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
+                let mut chosen = None;
                 egui::ComboBox::from_label("Profile")
                     .selected_text(self.state.selected_profile().name.clone())
                     .show_ui(ui, |ui| {
                         for (i, p) in self.state.profiles.iter().enumerate() {
-                            ui.selectable_value(&mut self.state.export_profile, i, &p.name);
+                            let selected = self.state.export_profile == Some(i);
+                            if ui.selectable_label(selected, &p.name).clicked() {
+                                chosen = Some(i);
+                            }
                         }
+                        ui.add_enabled(
+                            false,
+                            egui::Button::selectable(self.state.export_profile.is_none(), "Custom"),
+                        );
                     });
-                let p = self.state.selected_profile();
-                ui.label(format!(
-                    "{}×{} · {} fps · {} kbit/s · H.264/AAC MP4",
-                    p.video.width, p.video.height, p.video.frame_rate, p.video.bitrate_kbps
-                ));
+                if let Some(i) = chosen {
+                    self.state.choose_profile(i);
+                }
+                export_settings_editor(ui, &mut self.state.export_settings.video);
+                self.state.sync_custom_profile();
+                ui.label(egui::RichText::new("H.264 / AAC · MP4").color(theme::TEXT_DIM));
                 ui.horizontal(|ui| {
                     ui.text_edit_singleline(&mut self.state.export_path);
                     if ui.button("Browse…").clicked() {
@@ -634,6 +731,80 @@ impl FrameworkApp {
     }
 }
 
+/// Free resolution, frame rate and bitrate fields of the export dialog.
+fn export_settings_editor(ui: &mut egui::Ui, video: &mut framework_core::VideoSettings) {
+    egui::Grid::new("export-settings")
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Resolution");
+            ui.horizontal(|ui| {
+                for (value, label) in [(&mut video.width, "width"), (&mut video.height, "height")] {
+                    ui.add(
+                        egui::DragValue::new(value)
+                            .range(16..=8192)
+                            .speed(2.0)
+                            .suffix(" px"),
+                    )
+                    .on_hover_text(label);
+                }
+            });
+            ui.end_row();
+            ui.label("Frame rate");
+            let mut fps = video.frame_rate.as_f64();
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::DragValue::new(&mut fps)
+                        .range(1.0..=240.0)
+                        .max_decimals(3)
+                        .suffix(" fps"),
+                );
+                egui::ComboBox::from_id_salt("fps-presets")
+                    .selected_text("Presets")
+                    .show_ui(ui, |ui| {
+                        for preset in [23.976, 24.0, 25.0, 29.97, 30.0, 50.0, 59.94, 60.0] {
+                            if ui.selectable_label(false, format!("{preset}")).clicked() {
+                                fps = preset;
+                            }
+                        }
+                    });
+            });
+            if (fps - video.frame_rate.as_f64()).abs() > 1e-6 {
+                video.frame_rate = rate_from_fps(fps);
+            }
+            ui.end_row();
+            ui.label("Video bitrate");
+            ui.add(
+                egui::DragValue::new(&mut video.bitrate_kbps)
+                    .range(100..=500_000)
+                    .speed(50.0)
+                    .suffix(" kbit/s"),
+            );
+            ui.end_row();
+        });
+}
+
+/// The profile with even dimensions, as H.264 with 4:2:0 chroma requires.
+/// Applied at export time so typing a width digit by digit is not disturbed.
+pub fn encodable(profile: &framework_core::ExportProfile) -> framework_core::ExportProfile {
+    let mut p = profile.clone();
+    p.video.width = (p.video.width & !1).max(2);
+    p.video.height = (p.video.height & !1).max(2);
+    p
+}
+
+/// Exact rational for a frame rate, recognising NTSC rates such as 29.97 (30000/1001).
+pub fn rate_from_fps(fps: f64) -> framework_core::Rational {
+    let ntsc = (fps * 1.001).round();
+    if fps.fract() == 0.0 {
+        framework_core::Rational::new(fps.max(1.0) as u32, 1)
+    } else if (ntsc * 1000.0 / 1001.0 - fps).abs() < 0.005 {
+        framework_core::Rational::new(ntsc as u32 * 1000, 1001)
+    } else {
+        framework_core::Rational::new((fps * 1000.0).round().max(1.0) as u32, 1000)
+    }
+}
+
 fn planned_list(ui: &mut egui::Ui, items: &[(&str, &str)]) {
     for (name, when) in items {
         ui.add_enabled_ui(false, |ui| {
@@ -660,6 +831,35 @@ pub fn fit_aspect(avail: Vec2, content: Vec2) -> Vec2 {
     }
     let scale = (avail.x / content.x).min(avail.y / content.y);
     content * scale
+}
+
+/// Appends `.fwk` unless the path already ends in it.
+pub fn with_project_extension(path: &std::path::Path) -> PathBuf {
+    if path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case(PROJECT_EXTENSION))
+    {
+        path.to_owned()
+    } else {
+        let mut p = path.as_os_str().to_owned();
+        p.push(format!(".{PROJECT_EXTENSION}"));
+        PathBuf::from(p)
+    }
+}
+
+/// Path a project chosen in a save dialog is written to. The dialog only
+/// confirmed replacing `chosen`, so an existing file that appending `.fwk`
+/// would silently replace is refused.
+pub fn project_save_target(chosen: &std::path::Path) -> Result<PathBuf, String> {
+    let path = with_project_extension(chosen);
+    if path != chosen && path.exists() {
+        Err(format!(
+            "{} already exists; select it in the dialog to replace it",
+            path.display()
+        ))
+    } else {
+        Ok(path)
+    }
 }
 
 impl eframe::App for FrameworkApp {
@@ -750,9 +950,136 @@ mod tests {
         app.use_dialogs = false;
         app.state = EditorState::new(project);
         app.state.export_path = dir.join("ui-export.mp4").to_string_lossy().into_owned();
-        app.state.project_path = Some(dir.join("project.framework.json"));
+        app.state.project_path = Some(dir.join("project.fwk"));
         app.touch();
         (ctx, app)
+    }
+
+    #[test]
+    fn collect_and_save_embeds_media() {
+        let (ctx, mut app) = app_with_project();
+        let path = app
+            .state
+            .project_path
+            .clone()
+            .unwrap()
+            .with_file_name("collected.fwk");
+        app.save_project(&path, SaveMode::Collect);
+        assert!(
+            app.state.status.contains("embedded media"),
+            "{}",
+            app.state.status
+        );
+        assert!(!app.state.dirty);
+        assert!(app.state.project.media.iter().all(|m| m.location.is_some()));
+        // Re-saving over the open container works while the preview reads from it.
+        frame(&mut app, &ctx, vec![]);
+        app.save_project(&path, SaveMode::Reference);
+        assert!(
+            app.state.status.starts_with("Saved"),
+            "{}",
+            app.state.status
+        );
+        assert!(app.open_project(&path));
+        assert!(app.state.project.media.iter().all(|m| m.embedded.is_some()));
+    }
+
+    #[test]
+    fn timeline_zoom_shortcuts() {
+        let (ctx, mut app) = app_with_project();
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.timeline_width > 0.0);
+        let zoom = app.state.zoom;
+        frame(
+            &mut app,
+            &ctx,
+            vec![key(egui::Key::Plus, Modifiers::COMMAND)],
+        );
+        assert_eq!(app.state.zoom, zoom * crate::state::ZOOM_STEP);
+        frame(
+            &mut app,
+            &ctx,
+            vec![key(egui::Key::Equals, Modifiers::COMMAND)],
+        );
+        frame(
+            &mut app,
+            &ctx,
+            vec![key(egui::Key::Minus, Modifiers::COMMAND)],
+        );
+        frame(
+            &mut app,
+            &ctx,
+            vec![key(egui::Key::Minus, Modifiers::COMMAND)],
+        );
+        assert!((app.state.zoom - zoom).abs() < 1e-3);
+        frame(
+            &mut app,
+            &ctx,
+            vec![key(egui::Key::Num0, Modifiers::COMMAND)],
+        );
+        let duration = app.state.project.duration().as_seconds() as f32;
+        assert!((app.state.zoom * duration - app.timeline_width).abs() < 1.0);
+        // The whole UI does not zoom.
+        assert_eq!(ctx.zoom_factor(), 1.0);
+    }
+
+    #[test]
+    fn export_dialog_with_custom_settings() {
+        let (ctx, mut app) = app_with_project();
+        app.export_window = true;
+        frame(&mut app, &ctx, vec![]);
+        app.state.choose_profile(2);
+        app.state.export_settings.video.width = 1001;
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.state.export_settings.video.width, 1001);
+        assert_eq!(encodable(app.state.selected_profile()).video.width, 1000);
+        assert_eq!(app.state.export_profile, None);
+        assert_eq!(app.state.selected_profile().name, "Custom");
+    }
+
+    #[test]
+    fn frame_rates_become_exact_rationals() {
+        use framework_core::Rational;
+        assert_eq!(rate_from_fps(25.0), Rational::new(25, 1));
+        assert_eq!(rate_from_fps(29.97), Rational::new(30000, 1001));
+        assert_eq!(rate_from_fps(23.976), Rational::new(24000, 1001));
+        assert_eq!(rate_from_fps(59.94), Rational::new(60000, 1001));
+        assert_eq!(rate_from_fps(12.5), Rational::new(12500, 1000));
+    }
+
+    #[test]
+    fn save_dialog_never_replaces_an_unconfirmed_project() {
+        let dir = std::env::temp_dir().join(format!("framework-target-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let existing = dir.join("taken.fwk");
+        std::fs::write(&existing, b"x").unwrap();
+        assert!(project_save_target(&dir.join("taken")).is_err());
+        assert_eq!(project_save_target(&existing).unwrap(), existing);
+        assert_eq!(
+            project_save_target(&dir.join("new")).unwrap(),
+            dir.join("new.fwk")
+        );
+    }
+
+    #[test]
+    fn project_extension_is_appended() {
+        use std::path::Path;
+        assert_eq!(
+            with_project_extension(Path::new("a/b")),
+            Path::new("a/b.fwk")
+        );
+        assert_eq!(
+            with_project_extension(Path::new("a/b.fwk")),
+            Path::new("a/b.fwk")
+        );
+        assert_eq!(
+            with_project_extension(Path::new("a/b.FWK")),
+            Path::new("a/b.FWK")
+        );
+        assert_eq!(
+            with_project_extension(Path::new("b.json")),
+            Path::new("b.json.fwk")
+        );
     }
 
     #[test]
@@ -874,8 +1201,8 @@ mod tests {
             .parent()
             .unwrap()
             .to_owned();
-        let path = dir.join("saved.framework.json");
-        assert!(app.state.save_to(&path));
+        let path = dir.join("saved.fwk");
+        assert!(app.state.save_to(&path, SaveMode::Reference));
         frame(&mut app, &ctx, vec![]);
         for action in [
             UiAction::Save,

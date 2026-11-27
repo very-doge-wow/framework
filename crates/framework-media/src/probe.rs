@@ -5,6 +5,20 @@ use std::path::Path;
 
 const STILL_IMAGE_CODECS: &[&str] = &["png", "mjpeg", "bmp", "tiff", "webp", "gif", "jpegls"];
 
+/// Checks that every referenced (not yet embedded) asset is media of the kind
+/// the project records, so collecting an untrusted project cannot embed
+/// arbitrary local files.
+pub fn check_collectable(project: &framework_core::Project) -> Result<(), MediaError> {
+    for asset in project.media.iter().filter(|m| m.embedded.is_none()) {
+        // Only regular local files: FFmpeg would open URLs such as `http://…`.
+        let local = std::fs::metadata(&asset.path).is_ok_and(|m| m.is_file());
+        if !local || probe(&asset.path)?.kind != asset.kind() {
+            return Err(MediaError::UnexpectedKind(asset.path.clone()));
+        }
+    }
+    Ok(())
+}
+
 /// Reads the technical metadata of a media file.
 pub fn probe(path: &Path) -> Result<MediaInfo, MediaError> {
     crate::init();

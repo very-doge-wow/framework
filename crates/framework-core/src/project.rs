@@ -1,12 +1,11 @@
 use crate::time::{Rational, Time};
 use serde::{Deserialize, Serialize};
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use uuid::Uuid;
 
 /// Current on-disk project format version. Bump when the schema changes in a
 /// way that older readers cannot handle and add a migration in [`Project::from_json`].
-pub const PROJECT_FORMAT_VERSION: u32 = 1;
+pub const PROJECT_FORMAT_VERSION: u32 = 2;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProjectError {
@@ -16,6 +15,10 @@ pub enum ProjectError {
     Json(#[from] serde_json::Error),
     #[error("unsupported project format version {found} (this build supports up to {supported})")]
     UnsupportedVersion { found: u32, supported: u32 },
+    #[error("invalid project container: {0}")]
+    Package(#[from] zip::result::ZipError),
+    #[error("embedded media {0} is missing from the project container")]
+    MissingEmbedded(String),
     #[error("unknown media id {0}")]
     UnknownMedia(MediaId),
     #[error("unknown track id {0}")]
@@ -94,8 +97,23 @@ pub struct MediaInfo {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MediaAsset {
     pub id: MediaId,
+    /// Original location of the media; kept for embedded media as well.
     pub path: PathBuf,
     pub info: MediaInfo,
+    /// Entry name inside the `.fwk` container when the media is embedded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedded: Option<String>,
+    /// Byte range of the embedded media in the opened container (runtime only).
+    #[serde(skip)]
+    pub location: Option<EmbeddedLocation>,
+}
+
+/// Where the bytes of an embedded media file live on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddedLocation {
+    pub container: PathBuf,
+    pub start: u64,
+    pub len: u64,
 }
 
 impl MediaAsset {
@@ -104,6 +122,22 @@ impl MediaAsset {
             id: MediaId::new(),
             path: path.into(),
             info,
+            embedded: None,
+            location: None,
+        }
+    }
+
+    /// Path to hand to FFmpeg: the original file, or an FFmpeg `subfile:` URL
+    /// reading the uncompressed entry straight out of the `.fwk` container.
+    pub fn source(&self) -> PathBuf {
+        match &self.location {
+            Some(loc) => PathBuf::from(format!(
+                "subfile,,start,{},end,{},,:{}",
+                loc.start,
+                loc.start + loc.len,
+                loc.container.display()
+            )),
+            None => self.path.clone(),
         }
     }
 
@@ -376,20 +410,6 @@ impl Project {
             });
         }
         Ok(serde_json::from_str(json)?)
-    }
-
-    pub fn load(path: impl AsRef<Path>) -> Result<Self, ProjectError> {
-        Self::from_json(&fs::read_to_string(path)?)
-    }
-
-    pub fn save(&self, path: impl AsRef<Path>) -> Result<(), ProjectError> {
-        let path = path.as_ref();
-        let mut tmp = path.as_os_str().to_owned();
-        tmp.push(".tmp");
-        let tmp = std::path::PathBuf::from(tmp);
-        fs::write(&tmp, self.to_json()?)?;
-        fs::rename(tmp, path)?;
-        Ok(())
     }
 }
 

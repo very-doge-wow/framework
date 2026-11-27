@@ -259,7 +259,7 @@ impl AudioMixer<'_> {
                 let reader = match self.readers.entry(clip.id) {
                     std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
                     std::collections::hash_map::Entry::Vacant(e) => {
-                        e.insert(AudioReader::open(&asset.path, self.rate)?)
+                        e.insert(AudioReader::open(&asset.source(), self.rate)?)
                     }
                 };
                 let src = clip.source_in.to_samples(self.rate) + (a - cs);
@@ -349,7 +349,7 @@ fn render(
                 let reader = match video_readers.entry(clip.id) {
                     std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
                     std::collections::hash_map::Entry::Vacant(e) => e.insert(VideoReader::open(
-                        &asset.path,
+                        &asset.source(),
                         asset.kind() == MediaKind::Image,
                     )?),
                 };

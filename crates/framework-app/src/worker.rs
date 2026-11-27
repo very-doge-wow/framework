@@ -8,27 +8,44 @@ use std::thread::JoinHandle;
 
 /// Renders preview frames on a background thread. Only the most recent
 /// request is processed, so scrubbing never builds up a backlog.
+enum PreviewRequest {
+    Render(Project, Time),
+    /// Close all open media files, then acknowledge.
+    Release(Sender<()>),
+}
+
 pub struct PreviewWorker {
-    requests: Option<Sender<(Project, Time)>>,
+    requests: Option<Sender<PreviewRequest>>,
     results: Receiver<Result<RgbaImage, String>>,
     handle: Option<JoinHandle<()>>,
 }
 
 impl PreviewWorker {
     pub fn spawn(width: u32, height: u32, wake: impl Fn() + Send + 'static) -> Self {
-        let (req_tx, req_rx) = mpsc::channel::<(Project, Time)>();
+        let (req_tx, req_rx) = mpsc::channel::<PreviewRequest>();
         let (res_tx, res_rx) = mpsc::channel();
         let handle = std::thread::spawn(move || {
             let mut renderer = PreviewRenderer::new(width, height);
             while let Ok(mut req) = req_rx.recv() {
-                while let Ok(newer) = req_rx.try_recv() {
-                    req = newer;
+                while matches!(req, PreviewRequest::Render(..)) {
+                    match req_rx.try_recv() {
+                        Ok(newer) => req = newer,
+                        Err(_) => break,
+                    }
                 }
-                let result = renderer.render(&req.0, req.1).map_err(|e| e.to_string());
-                if res_tx.send(result).is_err() {
-                    break;
+                match req {
+                    PreviewRequest::Release(ack) => {
+                        renderer = PreviewRenderer::new(width, height);
+                        let _ = ack.send(());
+                    }
+                    PreviewRequest::Render(project, t) => {
+                        let result = renderer.render(&project, t).map_err(|e| e.to_string());
+                        if res_tx.send(result).is_err() {
+                            break;
+                        }
+                        wake();
+                    }
                 }
-                wake();
             }
         });
         Self {
@@ -40,7 +57,18 @@ impl PreviewWorker {
 
     pub fn request(&self, project: &Project, t: Time) {
         if let Some(tx) = &self.requests {
-            let _ = tx.send((project.clone(), t));
+            let _ = tx.send(PreviewRequest::Render(project.clone(), t));
+        }
+    }
+
+    /// Closes every media file the preview holds open and waits until it did,
+    /// so the project file can be replaced (required on Windows).
+    pub fn release_media(&self) {
+        if let Some(tx) = &self.requests {
+            let (ack_tx, ack_rx) = mpsc::channel();
+            if tx.send(PreviewRequest::Release(ack_tx)).is_ok() {
+                let _ = ack_rx.recv();
+            }
         }
     }
 
@@ -155,6 +183,17 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         };
         assert_eq!((img.width, img.height), (32, 18));
+
+        // After releasing its media files the worker still renders.
+        worker.release_media();
+        worker.request(&p, Time::from_seconds(0.2));
+        let img = loop {
+            if let Some(r) = worker.poll() {
+                break r.unwrap();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        assert_eq!(img.width, 32);
     }
 
     #[test]

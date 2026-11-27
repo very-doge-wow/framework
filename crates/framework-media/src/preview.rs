@@ -4,6 +4,7 @@ use crate::video::{Fitter, VideoReader};
 use ffmpeg_next::format;
 use framework_core::{ClipId, MediaKind, Project, Time};
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 /// A tightly packed 8-bit RGBA image.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,7 +17,8 @@ pub struct RgbaImage {
 /// Renders single timeline frames for the editor preview, keeping decoders
 /// open between calls so that scrubbing and playback stay cheap.
 pub struct PreviewRenderer {
-    readers: HashMap<ClipId, VideoReader>,
+    /// Open decoders per clip, with the media source they were opened for.
+    readers: HashMap<ClipId, (PathBuf, VideoReader)>,
     fitter: Fitter,
     width: u32,
     height: u32,
@@ -42,12 +44,15 @@ impl PreviewRenderer {
     pub fn render(&mut self, project: &Project, t: Time) -> Result<RgbaImage, MediaError> {
         let frame = match top_video_clip(project, t) {
             Some((clip, asset)) => {
+                let source = asset.source();
                 let reader = match self.readers.entry(clip.id) {
-                    std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
-                    std::collections::hash_map::Entry::Vacant(e) => e.insert(VideoReader::open(
-                        &asset.path,
-                        asset.kind() == MediaKind::Image,
-                    )?),
+                    std::collections::hash_map::Entry::Occupied(e) if e.get().0 == source => {
+                        &mut e.into_mut().1
+                    }
+                    e => {
+                        let reader = VideoReader::open(&source, asset.kind() == MediaKind::Image)?;
+                        &mut e.insert_entry((source, reader)).into_mut().1
+                    }
                 };
                 let orientation = reader.orientation();
                 let pixel_aspect = reader.pixel_aspect();
