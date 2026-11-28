@@ -1108,7 +1108,7 @@ impl FrameworkApp {
         };
         let moving = match drag.kind {
             DragKind::Move => before.with_groups(&ids),
-            _ => vec![clip.id],
+            _ => before.with_groups(&[clip.id]),
         };
         let mut points: Vec<Time> = before
             .tracks

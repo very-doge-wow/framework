@@ -109,10 +109,9 @@ impl Project {
         created
     }
 
-    /// Moves the left edge of a clip to `t`, keeping its right edge. The edge
-    /// stops at the previous clip, the start of the source media and `min`
-    /// before the right edge. Returns the new start.
-    pub fn trim_start(&mut self, id: ClipId, t: Time, min: Time) -> Result<Time, ProjectError> {
+    /// Range for a clip's left edge: the previous clip and the start of the
+    /// source media, and `min` before its right edge.
+    fn start_bounds(&self, id: ClipId, min: Time) -> Result<(Time, Time), ProjectError> {
         let (ti, ci) = self.locate(id).ok_or(ProjectError::UnknownClip(id))?;
         let track = &self.tracks[ti];
         let clip = &track.clips[ci];
@@ -124,20 +123,12 @@ impl Project {
         if self.source_length(clip).is_some() {
             lo = lo.max(clip.start - clip.source_in);
         }
-        // Neighbours win over the minimum length, so a trim never overlaps.
-        let t = t.min(clip.end() - min).max(lo);
-        let delta = t - clip.start;
-        let clip = self.clip_mut(id)?;
-        clip.start = t;
-        clip.source_in += delta;
-        clip.duration -= delta;
-        Ok(t)
+        Ok((lo, clip.end() - min))
     }
 
-    /// Moves the right edge of a clip to `t`. The edge stops at the next clip,
-    /// the end of the source media and `min` after the left edge. Returns the
-    /// new end.
-    pub fn trim_end(&mut self, id: ClipId, t: Time, min: Time) -> Result<Time, ProjectError> {
+    /// Range for a clip's right edge: `min` after its left edge, and the next
+    /// clip and the end of the source media.
+    fn end_bounds(&self, id: ClipId, min: Time) -> Result<(Time, Time), ProjectError> {
         let (ti, ci) = self.locate(id).ok_or(ProjectError::UnknownClip(id))?;
         let track = &self.tracks[ti];
         let clip = &track.clips[ci];
@@ -145,10 +136,51 @@ impl Project {
         if let Some(len) = self.source_length(clip) {
             hi = hi.min(clip.start + (len - clip.source_in));
         }
-        let t = t.max(clip.start + min).min(hi);
-        let start = clip.start;
-        self.clip_mut(id)?.duration = t - start;
-        Ok(t)
+        Ok((clip.start + min, hi))
+    }
+
+    /// Moves the left edge of a clip towards `t`, keeping its right edge.
+    /// Grouped clips are trimmed by the same amount so they stay in sync.
+    /// Edges stop at neighbouring clips and the start of the source media
+    /// (these win over the minimum length `min`). Returns the new start.
+    pub fn trim_start(&mut self, id: ClipId, t: Time, min: Time) -> Result<Time, ProjectError> {
+        let start = self.clip(id).ok_or(ProjectError::UnknownClip(id))?.start;
+        let members = self.with_groups(&[id]);
+        let (mut lower, mut upper) = (-UNLIMITED, UNLIMITED);
+        for m in &members {
+            let (lo, hi) = self.start_bounds(*m, min)?;
+            let s = self.clip(*m).ok_or(ProjectError::UnknownClip(*m))?.start;
+            lower = lower.max(lo - s);
+            upper = upper.min(hi - s);
+        }
+        let delta = (t - start).min(upper).max(lower);
+        for m in members {
+            let clip = self.clip_mut(m)?;
+            clip.start += delta;
+            clip.source_in += delta;
+            clip.duration -= delta;
+        }
+        Ok(start + delta)
+    }
+
+    /// Moves the right edge of a clip (and of its group, by the same amount)
+    /// towards `t`. Edges stop at the next clip and the end of the source
+    /// media, and keep at least `min` length. Returns the new end.
+    pub fn trim_end(&mut self, id: ClipId, t: Time, min: Time) -> Result<Time, ProjectError> {
+        let end = self.clip(id).ok_or(ProjectError::UnknownClip(id))?.end();
+        let members = self.with_groups(&[id]);
+        let (mut lower, mut upper) = (-UNLIMITED, UNLIMITED);
+        for m in &members {
+            let (lo, hi) = self.end_bounds(*m, min)?;
+            let e = self.clip(*m).ok_or(ProjectError::UnknownClip(*m))?.end();
+            lower = lower.max(lo - e);
+            upper = upper.min(hi - e);
+        }
+        let delta = (t - end).max(lower).min(upper);
+        for m in members {
+            self.clip_mut(m)?.duration += delta;
+        }
+        Ok(end + delta)
     }
 
     /// Indices into [`Project::tracks`] of all lanes of a kind, bottom to top
@@ -417,6 +449,31 @@ mod tests {
         let piece = p.split_clips(&[a], s(6.0) - tiny)[0];
         assert_eq!(p.trim_end(piece, s(5.0), min).unwrap(), s(6.0));
         assert_eq!(p.trim_start(piece, s(7.0), min).unwrap(), s(6.0) - tiny);
+        assert_eq!(p.clip(b).unwrap().start, s(6.0));
+    }
+
+    #[test]
+    fn trims_apply_to_the_whole_group() {
+        let (mut p, a, b) = project();
+        let video = p.clip(a).unwrap().media;
+        let a1 = p.tracks[1].id;
+        let d = p
+            .add_clip(a1, Clip::new(video, s(0.0), s(0.0), s(4.0)))
+            .unwrap();
+        p.group_clips(&[a, d]).unwrap();
+        let min = s(0.5);
+        assert_eq!(p.trim_end(a, s(3.0), min).unwrap(), s(3.0));
+        assert_eq!(p.clip(d).unwrap().end(), s(3.0));
+        assert_eq!(p.trim_start(d, s(1.0), min).unwrap(), s(1.0));
+        assert_eq!(
+            (p.clip(a).unwrap().start, p.clip(a).unwrap().source_in),
+            (s(1.0), s(3.0))
+        );
+        assert_eq!(p.clip(d).unwrap().source_in, s(1.0));
+        // The member with the least room limits the whole group.
+        assert_eq!(p.trim_start(a, s(-5.0), min).unwrap(), s(0.0));
+        assert_eq!(p.clip(d).unwrap().source_in, s(0.0));
+        assert_eq!(p.trim_end(d, s(20.0), min).unwrap(), s(6.0));
         assert_eq!(p.clip(b).unwrap().start, s(6.0));
     }
 

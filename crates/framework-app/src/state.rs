@@ -305,7 +305,14 @@ impl EditorState {
             if ids.is_empty() {
                 return Err(ProjectError::InvalidEdit("no clip under the playhead"));
             }
+            // Group members follow the first trimmed clip of their group.
+            let mut groups = std::collections::HashSet::new();
             for id in &ids {
+                if let Some(group) = p.clip(*id).and_then(|c| c.group)
+                    && !groups.insert(group)
+                {
+                    continue;
+                }
                 if start {
                     p.trim_start(*id, t, min)?;
                 } else {
@@ -806,6 +813,27 @@ mod tests {
         assert_eq!(st.selected_clips, vec![a]);
         assert!(st.delete_selection(false));
         assert!(st.selected_clips.is_empty());
+    }
+
+    #[test]
+    fn playhead_trims_keep_groups_in_sync() {
+        use framework_core::Clip;
+        let (mut st, a, _) = editable();
+        let media = st.project.clip(a).unwrap().media;
+        let v2 = st.add_lane(TrackKind::Video).unwrap();
+        let c = st
+            .project
+            .add_clip(
+                v2,
+                Clip::new(media, Time::ZERO, Time::ZERO, Time::from_seconds(2.0)),
+            )
+            .unwrap();
+        st.project.group_clips(&[a, c]).unwrap();
+        st.set_playhead(Time::from_seconds(1.0));
+        assert!(st.trim_to_playhead(false));
+        for id in [a, c] {
+            assert_eq!(st.project.clip(id).unwrap().end(), Time::from_seconds(1.0));
+        }
     }
 
     #[test]
