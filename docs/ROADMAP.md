@@ -131,6 +131,15 @@ compatible with GPL-3.0 redistribution.
 - [ ] In-app auto-update from GitHub Releases with checksum verification.
       Manual install commands: [INSTALLING.md](INSTALLING.md). — [#27](https://github.com/very-doge-wow/framework/issues/27)
 
+## CI hardening (cross-cutting)
+
+- [ ] Security scans: RustSec advisories, FFmpeg/x264 CVEs, npm audit,
+      workflow analysis, CodeQL, SBOM per release. — [#32](https://github.com/very-doge-wow/framework/issues/32)
+- [ ] Secret scanning: gitleaks on PRs and full history, GitHub push
+      protection. — [#33](https://github.com/very-doge-wow/framework/issues/33)
+- [ ] Lint job: Rust (fmt, clippy, docs), shell, Markdown, workflows, TOML,
+      spelling; `scripts/lint.sh` for local runs. — [#34](https://github.com/very-doge-wow/framework/issues/34)
+
 ## Later
 
 - [ ] More output formats (HEVC, AV1, ProRes/MOV, WebM, audio-only). — [#18](https://github.com/very-doge-wow/framework/issues/18)
