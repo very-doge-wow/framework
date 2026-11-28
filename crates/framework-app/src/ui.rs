@@ -1302,6 +1302,7 @@ impl FrameworkApp {
 
         let project = &self.state.project;
         let linked = project.with_groups(&self.state.selected_clips);
+        let group_colors = group_colors(project);
         for (index, lane) in self.lane_layout(rect) {
             let track = &project.tracks[index];
             let active = project.lane_active(track);
@@ -1374,12 +1375,19 @@ impl FrameworkApp {
                 }
                 let clipped = painter.with_clip_rect(r.shrink(2.0));
                 let mut text_x = 8.0;
-                if clip.group.is_some() {
-                    paint_link(
-                        &clipped,
-                        r.left_center() + Vec2::new(8.0, 0.0),
-                        Color32::WHITE,
+                if let Some(color) = clip.group.and_then(|g| group_colors.get(&g)) {
+                    // Band along the top in the group's colour.
+                    painter.rect_filled(
+                        Rect::from_min_max(r.min, Pos2::new(r.right(), r.top() + 4.0)),
+                        egui::CornerRadius {
+                            nw: 4,
+                            ne: 4,
+                            sw: 0,
+                            se: 0,
+                        },
+                        *color,
                     );
+                    paint_link(&clipped, r.left_center() + Vec2::new(8.0, 0.0), *color);
                     text_x = 24.0;
                 }
                 clipped.text(
@@ -1672,6 +1680,35 @@ struct Marquee {
     origin: Pos2,
     current: Pos2,
     base: Vec<ClipId>,
+}
+
+/// Distinct, light colours for grouped clips (readable on every clip fill).
+const GROUP_PALETTE: [Color32; 8] = [
+    Color32::from_rgb(0xff, 0xd1, 0x66),
+    Color32::from_rgb(0xff, 0x8f, 0xab),
+    Color32::from_rgb(0x7f, 0xff, 0xd4),
+    Color32::from_rgb(0xff, 0xa8, 0x5c),
+    Color32::from_rgb(0xc7, 0xa6, 0xff),
+    Color32::from_rgb(0xa8, 0xe6, 0x5c),
+    Color32::from_rgb(0x66, 0xd9, 0xff),
+    Color32::from_rgb(0xff, 0xff, 0xff),
+];
+
+/// A colour per group, assigned in timeline order so it stays stable while editing.
+fn group_colors(
+    project: &framework_core::Project,
+) -> std::collections::HashMap<framework_core::GroupId, Color32> {
+    let mut colors = std::collections::HashMap::new();
+    for group in project
+        .tracks
+        .iter()
+        .flat_map(|t| &t.clips)
+        .filter_map(|c| c.group)
+    {
+        let next = GROUP_PALETTE[colors.len() % GROUP_PALETTE.len()];
+        colors.entry(group).or_insert(next);
+    }
+    colors
 }
 
 /// Two interlocking chain links marking a grouped clip.
@@ -2749,6 +2786,26 @@ mod tests {
             vec![Event::PointerMoved(over), Event::Zoom(2.0)],
         );
         assert!(app.state.zoom > zoom);
+    }
+
+    #[test]
+    fn groups_get_distinct_colours() {
+        let (_, mut app) = app_with_project();
+        let ids: Vec<ClipId> = app
+            .state
+            .project
+            .tracks
+            .iter()
+            .flat_map(|t| &t.clips)
+            .map(|c| c.id)
+            .collect();
+        assert!(group_colors(&app.state.project).is_empty());
+        app.state.project.group_clips(&ids[..2]).unwrap();
+        app.state.project.group_clips(&ids[2..3]).unwrap_err();
+        let first = app.state.project.clip(ids[0]).unwrap().group.unwrap();
+        let colors = group_colors(&app.state.project);
+        assert_eq!(colors.len(), 1);
+        assert_eq!(colors[&first], GROUP_PALETTE[0]);
     }
 
     #[test]
