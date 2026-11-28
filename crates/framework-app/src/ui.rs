@@ -1034,8 +1034,11 @@ impl FrameworkApp {
                     (&left, DragKind::TrimStart),
                     (&right, DragKind::TrimEnd),
                 ] {
+                    // Measured from the press, not from where the drag threshold was crossed.
                     if response.drag_started()
-                        && let Some(pos) = response.interact_pointer_pos()
+                        && let Some(pos) = ui
+                            .input(|i| i.pointer.press_origin())
+                            .or(response.interact_pointer_pos())
                     {
                         start_drag = Some(ClipDrag {
                             kind,
@@ -2384,5 +2387,280 @@ mod tests {
         }
         app.perform(UiAction::New, &ctx);
         assert!(!app.transport.is_playing());
+    }
+
+    fn pointer(pos: egui::Pos2, button: PointerButton, pressed: bool) -> Event {
+        Event::PointerButton {
+            pos,
+            button,
+            pressed,
+            modifiers: Modifiers::NONE,
+        }
+    }
+
+    fn drag(app: &mut FrameworkApp, ctx: &egui::Context, from: egui::Pos2, to: egui::Pos2) {
+        frame(
+            app,
+            ctx,
+            vec![
+                Event::PointerMoved(from),
+                pointer(from, PointerButton::Primary, true),
+            ],
+        );
+        frame(
+            app,
+            ctx,
+            vec![Event::PointerMoved(from + (to - from) * 0.5)],
+        );
+        frame(app, ctx, vec![Event::PointerMoved(to)]);
+        frame(app, ctx, vec![pointer(to, PointerButton::Primary, false)]);
+        frame(app, ctx, vec![]);
+    }
+
+    fn rect_of(app: &FrameworkApp, id: ClipId) -> Rect {
+        app.clip_rects.iter().find(|(c, _)| *c == id).unwrap().1
+    }
+
+    fn image_clip(app: &FrameworkApp) -> ClipId {
+        app.state.project.tracks[0].clips[1].id
+    }
+
+    #[test]
+    fn drag_moves_and_trims_clips_with_undo() {
+        let (ctx, mut app) = app_with_project();
+        app.snapping = false;
+        frame(&mut app, &ctx, vec![]);
+        let id = image_clip(&app);
+        let original = app.state.project.clip(id).unwrap().clone();
+        let start = original.start;
+        let r = rect_of(&app, id);
+        // Move 2 s to the right (80 px per second).
+        drag(&mut app, &ctx, r.center(), r.center() + vec2(160.0, 0.0));
+        let moved = app.state.project.clip(id).unwrap().start;
+        assert!(
+            (moved - start - Time::from_seconds(2.0)).flicks().abs()
+                < Time::from_seconds(0.05).flicks()
+        );
+        assert_eq!(app.state.selected_clips, vec![id]);
+        assert_eq!(app.state.status, "Moved");
+        // Trim the right edge 0.5 s to the left, then the left edge.
+        let end = app.state.project.clip(id).unwrap().end();
+        let r = rect_of(&app, id);
+        drag(
+            &mut app,
+            &ctx,
+            pos2(r.right() - 2.0, r.center().y),
+            pos2(r.right() - 42.0, r.center().y),
+        );
+        let trimmed = app.state.project.clip(id).unwrap().end();
+        assert!(trimmed < end);
+        let r = rect_of(&app, id);
+        drag(
+            &mut app,
+            &ctx,
+            pos2(r.left() + 2.0, r.center().y),
+            pos2(r.left() + 42.0, r.center().y),
+        );
+        assert!(app.state.project.clip(id).unwrap().start > moved);
+        assert_eq!(app.state.status, "Trimmed");
+        // Dragging onto the audio lane is impossible: the clip stays on its lane.
+        let r = rect_of(&app, id);
+        drag(
+            &mut app,
+            &ctx,
+            r.center(),
+            r.center() + vec2(0.0, TRACK_HEIGHT),
+        );
+        assert_eq!(app.state.project.locate(id).unwrap().0, 0);
+        // Snapping pulls the clip start onto the playhead.
+        app.snapping = true;
+        app.state.set_playhead(Time::from_seconds(5.0));
+        let r = rect_of(&app, id);
+        let start = app.state.project.clip(id).unwrap().start;
+        let to_playhead = (5.0 - start.as_seconds()) as f32 * app.state.zoom + 3.0;
+        drag(
+            &mut app,
+            &ctx,
+            r.center(),
+            r.center() + vec2(to_playhead, 0.0),
+        );
+        assert_eq!(
+            app.state.project.clip(id).unwrap().start,
+            Time::from_seconds(5.0)
+        );
+        // Every gesture is one undo step.
+        for _ in 0..4 {
+            app.timeline_command(TimelineCommand::Undo);
+        }
+        assert_eq!(app.state.project.clip(id), Some(&original));
+    }
+
+    #[test]
+    fn clicks_select_and_lane_buttons_toggle() {
+        let (ctx, mut app) = app_with_project();
+        frame(&mut app, &ctx, vec![]);
+        let video = app.state.project.tracks[0].clips[0].id;
+        let image = image_clip(&app);
+        let v = rect_of(&app, video).center();
+        frame(&mut app, &ctx, click(v));
+        assert_eq!(app.state.selected_clips, vec![video]);
+        let pos = rect_of(&app, image).center();
+        let mut events = vec![Event::ModifiersChanged(Modifiers::SHIFT)];
+        events.extend(click(pos));
+        frame(&mut app, &ctx, events);
+        frame(
+            &mut app,
+            &ctx,
+            vec![Event::ModifiersChanged(Modifiers::NONE)],
+        );
+        assert_eq!(app.state.selected_clips, vec![video, image]);
+        // Right-click selects an unselected clip and opens its menu.
+        app.state.selected_clips.clear();
+        frame(
+            &mut app,
+            &ctx,
+            vec![
+                Event::PointerMoved(pos),
+                pointer(pos, PointerButton::Secondary, true),
+                pointer(pos, PointerButton::Secondary, false),
+            ],
+        );
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.state.selected_clips, vec![image]);
+        frame(
+            &mut app,
+            &ctx,
+            vec![key(egui::Key::Escape, Modifiers::NONE)],
+        );
+        // Clicking an empty lane area clears the selection.
+        let empty = pos2(rect_of(&app, image).right() + 200.0, pos.y);
+        frame(&mut app, &ctx, click(empty));
+        assert!(app.state.selected_clips.is_empty());
+        // Mute and solo buttons; right-click on a lane header opens its menu.
+        let (track, header) = app.lane_rects[0];
+        let (mute, solo) = FrameworkApp::lane_buttons(header);
+        frame(&mut app, &ctx, click(mute.center()));
+        frame(&mut app, &ctx, click(solo.center()));
+        let t = app.state.project.track(track).unwrap();
+        assert!(t.muted && t.solo);
+        let h = header.left_top() + vec2(4.0, 4.0);
+        frame(
+            &mut app,
+            &ctx,
+            vec![
+                Event::PointerMoved(h),
+                pointer(h, PointerButton::Secondary, true),
+                pointer(h, PointerButton::Secondary, false),
+            ],
+        );
+        frame(&mut app, &ctx, vec![]);
+        // Hover cursors over the clip body and edge.
+        let r = rect_of(&app, image);
+        frame(&mut app, &ctx, vec![Event::PointerMoved(r.center())]);
+        frame(
+            &mut app,
+            &ctx,
+            vec![Event::PointerMoved(pos2(r.left() + 1.0, r.center().y))],
+        );
+    }
+
+    #[test]
+    fn menus_offer_all_commands() {
+        let ctx = egui::Context::default();
+        let mut found = Vec::new();
+        for y in (0..300).step_by(3) {
+            let mut commands = Vec::new();
+            let mut out = ctx.run_ui(input(click(pos2(40.0, y as f32))), |ui| {
+                clip_menu(ui, &mut commands);
+                ui.separator();
+                lane_menu(ui, TrackId::new(), TrackKind::Video, &mut commands);
+                lane_menu(ui, TrackId::new(), TrackKind::Audio, &mut commands);
+            });
+            out.textures_delta.clear();
+            for c in commands {
+                let c = match c {
+                    TimelineCommand::RemoveLane(_) => "RemoveLane".to_string(),
+                    TimelineCommand::MoveLane(_, up) => format!("MoveLane {up}"),
+                    c => format!("{c:?}"),
+                };
+                if !found.contains(&c) {
+                    found.push(c);
+                }
+            }
+        }
+        assert_eq!(found.len(), 7 + 5, "{found:?}");
+        assert_eq!(shortcut_label(true, true, "G").split(' ').count(), 3);
+    }
+
+    #[test]
+    fn editing_shortcuts_and_commands() {
+        let (ctx, mut app) = app_with_project();
+        frame(&mut app, &ctx, vec![]);
+        let clips = |app: &FrameworkApp| {
+            app.state
+                .project
+                .tracks
+                .iter()
+                .map(|t| t.clips.len())
+                .sum::<usize>()
+        };
+        let n = clips(&app);
+        app.state.set_playhead(Time::from_seconds(0.25));
+        press(&mut app, &ctx, egui::Key::S);
+        assert_eq!(clips(&app), n + 2);
+        frame(&mut app, &ctx, vec![key(egui::Key::Z, Modifiers::COMMAND)]);
+        assert_eq!(clips(&app), n);
+        frame(
+            &mut app,
+            &ctx,
+            vec![key(egui::Key::Z, Modifiers::COMMAND | Modifiers::SHIFT)],
+        );
+        assert_eq!(clips(&app), n + 2);
+        frame(&mut app, &ctx, vec![key(egui::Key::Z, Modifiers::COMMAND)]);
+        frame(&mut app, &ctx, vec![key(egui::Key::Y, Modifiers::COMMAND)]);
+        assert_eq!(clips(&app), n + 2);
+        frame(&mut app, &ctx, vec![key(egui::Key::Z, Modifiers::COMMAND)]);
+        frame(&mut app, &ctx, vec![key(egui::Key::B, Modifiers::COMMAND)]);
+        assert_eq!(clips(&app), n + 2);
+        app.state.set_playhead(Time::from_seconds(0.1));
+        press(&mut app, &ctx, egui::Key::Q);
+        assert_eq!(app.state.status, "Trimmed start");
+        app.state.set_playhead(Time::from_seconds(0.2));
+        press(&mut app, &ctx, egui::Key::W);
+        assert_eq!(app.state.status, "Trimmed end");
+        frame(&mut app, &ctx, vec![key(egui::Key::A, Modifiers::COMMAND)]);
+        assert_eq!(app.state.selected_clips.len(), clips(&app));
+        frame(&mut app, &ctx, vec![key(egui::Key::G, Modifiers::COMMAND)]);
+        assert_eq!(app.state.status, "Grouped");
+        frame(
+            &mut app,
+            &ctx,
+            vec![key(egui::Key::G, Modifiers::COMMAND | Modifiers::SHIFT)],
+        );
+        assert_eq!(app.state.status, "Ungrouped");
+        let first = app.state.project.tracks[0].clips[0].id;
+        app.state.selected_clips = vec![first];
+        press(&mut app, &ctx, egui::Key::Delete);
+        assert!(app.state.project.clip(first).is_none());
+        let next = app.state.project.tracks[0].clips[0].clone();
+        app.state.selected_clips = vec![next.id];
+        frame(
+            &mut app,
+            &ctx,
+            vec![key(egui::Key::Delete, Modifiers::SHIFT)],
+        );
+        assert_eq!(app.state.status, "Ripple delete");
+        // Lane commands.
+        app.timeline_command(TimelineCommand::AddLane(TrackKind::Video));
+        let lane = app.state.project.tracks[1].id;
+        app.timeline_command(TimelineCommand::MoveLane(lane, false));
+        assert_eq!(app.state.project.tracks[0].id, lane);
+        app.timeline_command(TimelineCommand::RemoveLane(lane));
+        assert!(app.state.project.track(lane).is_none());
+        // Many lanes and a grouped clip render.
+        app.timeline_command(TimelineCommand::AddLane(TrackKind::Audio));
+        app.timeline_command(TimelineCommand::SelectAll);
+        app.timeline_command(TimelineCommand::Group);
+        frame(&mut app, &ctx, vec![]);
     }
 }
