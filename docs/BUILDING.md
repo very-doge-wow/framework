@@ -20,7 +20,7 @@ Linux packages (Debian/Ubuntu names):
 
 ```sh
 sudo apt-get install -y build-essential git nasm pkg-config clang libclang-dev patchelf \
-  libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev libxi-dev libxcursor-dev libgl1-mesa-dev
+  libasound2-dev libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev libxi-dev libxcursor-dev libgl1-mesa-dev
 ```
 
 The Rust version is pinned in `rust-toolchain.toml`; rustup installs it

@@ -1,9 +1,13 @@
+use crate::audio_out::{AudioEngine, AudioOutput};
+use crate::playback::{self, PREVIEW_FPS, PreviewQuality, PreviewScale, Transport};
 use crate::state::{EditorState, MAX_ZOOM, MIN_ZOOM};
 use crate::theme;
 use crate::worker::{ExportJob, ExportState, PreviewWorker};
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle, Vec2};
 use framework_core::{MediaKind, PROJECT_EXTENSION, SaveMode, Time, TrackKind};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Instant;
 
 const TRACK_HEIGHT: f32 = 48.0;
 const HEADER_WIDTH: f32 = 72.0;
@@ -70,8 +74,18 @@ pub struct FrameworkApp {
     timeline_width: f32,
     /// Action waiting for the user to resolve unsaved changes.
     pub pending: Option<UiAction>,
-    /// When false, file dialogs are skipped (used by tests).
+    /// When false, file dialogs are skipped and no sound device is opened (tests).
     pub use_dialogs: bool,
+    pub transport: Transport,
+    last_tick: Option<Instant>,
+    /// Playhead after the last playback tick, to notice seeks during playback.
+    ticked_playhead: Time,
+    /// Playback engine whose clock drives the playhead at normal speed.
+    pub audio: Option<Arc<AudioEngine>>,
+    audio_output: Option<AudioOutput>,
+    audio_tried: bool,
+    pub preview_quality: PreviewQuality,
+    wake: egui::Context,
 }
 
 impl FrameworkApp {
@@ -79,12 +93,9 @@ impl FrameworkApp {
         theme::apply(ctx);
         // Cmd/Ctrl +/− zoom the timeline instead of the whole UI.
         ctx.options_mut(|o| o.zoom_with_keyboard = false);
-        let wake_ctx = ctx.clone();
-        Self {
+        let mut app = Self {
             state: EditorState::default(),
-            preview: Some(PreviewWorker::spawn(960, 540, move || {
-                wake_ctx.request_repaint()
-            })),
+            preview: None,
             preview_texture: None,
             preview_requested: None,
             project_revision: 0,
@@ -95,7 +106,106 @@ impl FrameworkApp {
             timeline_width: 0.0,
             pending: None,
             use_dialogs: true,
+            transport: Transport::default(),
+            last_tick: None,
+            ticked_playhead: Time::ZERO,
+            audio: None,
+            audio_output: None,
+            audio_tried: false,
+            preview_quality: PreviewQuality::default(),
+            wake: ctx.clone(),
+        };
+        app.spawn_preview();
+        app
+    }
+
+    fn spawn_preview(&mut self) {
+        let (w, h) = self.preview_quality.size(&self.state.project.settings);
+        let wake = self.wake.clone();
+        self.preview = Some(PreviewWorker::spawn(w, h, move || wake.request_repaint()));
+        self.preview_requested = None;
+    }
+
+    /// Changes the preview quality, restarting the renderer when the size changes.
+    pub fn set_preview_quality(&mut self, quality: PreviewQuality) {
+        let settings = &self.state.project.settings;
+        let resize = quality.size(settings) != self.preview_quality.size(settings);
+        self.preview_quality = quality;
+        if resize {
+            self.spawn_preview();
         }
+    }
+
+    /// Applies a transport command (play, pause, shuttle) and keeps audio in step.
+    pub fn transport_action(&mut self, command: impl FnOnce(&mut Transport)) {
+        let before = self.transport.speed;
+        command(&mut self.transport);
+        let end = self.state.project.duration();
+        if self.transport.speed > 0.0 && before <= 0.0 && self.state.playhead >= end {
+            self.state.set_playhead(Time::ZERO);
+        }
+        if self.transport.speed != before {
+            self.sync_audio();
+        }
+    }
+
+    /// Stops playback and moves the playhead.
+    pub fn seek(&mut self, t: Time) {
+        self.transport_action(Transport::pause);
+        self.state.set_playhead(t);
+    }
+
+    fn sync_audio(&mut self) {
+        if self.transport.speed == 1.0 {
+            if self.audio.is_none() && !self.audio_tried && self.use_dialogs {
+                self.audio_tried = true;
+                self.audio_output = AudioOutput::open();
+                self.audio = self.audio_output.as_ref().map(|o| o.engine.clone());
+            }
+            if let Some(audio) = &self.audio {
+                audio.play(&self.state.project, self.state.playhead);
+            }
+        } else if let Some(audio) = &self.audio {
+            audio.stop();
+        }
+        self.ticked_playhead = self.state.playhead;
+    }
+
+    /// Advances the playhead while playing: follows the audio clock at normal
+    /// speed, otherwise wall-clock time scaled by the shuttle speed.
+    fn tick_playback(&mut self, ctx: &egui::Context) {
+        if !self.transport.is_playing() {
+            self.last_tick = None;
+            return;
+        }
+        if self.state.playhead != self.ticked_playhead {
+            self.sync_audio();
+        }
+        let now = Instant::now();
+        let dt = self
+            .last_tick
+            .map_or(0.0, |t| now.duration_since(t).as_secs_f64());
+        self.last_tick = Some(now);
+        let end = self.state.project.duration();
+        let clock = (self.transport.speed == 1.0)
+            .then(|| self.audio.as_ref().and_then(|a| a.position()))
+            .flatten();
+        self.state.playhead = match clock {
+            Some(t) if t >= end => {
+                self.transport.pause();
+                end
+            }
+            Some(t) => t,
+            None => self.transport.advance(self.state.playhead, dt, end),
+        };
+        if let Some(e) = self.audio.as_ref().and_then(|a| a.take_error()) {
+            self.state.status = format!("Audio error: {e}");
+        }
+        if !self.transport.is_playing() {
+            self.sync_audio();
+        }
+        self.ticked_playhead = self.state.playhead;
+        ctx.request_repaint();
     }
 
     /// Opens a project file (e.g. passed on the command line).
@@ -130,6 +240,7 @@ impl FrameworkApp {
         for action in actions {
             self.perform(action, &ctx);
         }
+        self.tick_playback(&ctx);
         self.request_preview();
     }
 
@@ -143,9 +254,22 @@ impl FrameworkApp {
 
     fn request_preview(&mut self) {
         let key = (self.state.playhead, self.project_revision);
-        if self.preview_requested != Some(key)
-            && let Some(worker) = &self.preview
+        if self.preview_requested == Some(key) {
+            return;
+        }
+        // During playback, frames closer together than the preview frame rate are skipped.
+        if self.transport.is_playing()
+            && let Some((t, revision)) = self.preview_requested
+            && revision == self.project_revision
         {
+            let interval = self
+                .preview_quality
+                .frame_interval(self.state.project.settings.frame_rate);
+            if (self.state.playhead.flicks() - t.flicks()).abs() < interval.flicks() {
+                return;
+            }
+        }
+        if let Some(worker) = &self.preview {
             worker.request(&self.state.project, self.state.playhead);
             self.preview_requested = Some(key);
         }
@@ -194,11 +318,13 @@ impl FrameworkApp {
             }
             UiAction::CancelPending => self.pending = None,
             UiAction::New => {
+                self.seek(Time::ZERO);
                 self.state = EditorState::default();
                 self.touch();
             }
             UiAction::Open => {
                 if let Some(path) = self.pick_file(&[PROJECT_EXTENSION, "json"]) {
+                    self.seek(Time::ZERO);
                     self.state.open(&path);
                     self.touch();
                 }
@@ -301,15 +427,42 @@ impl FrameworkApp {
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         let fps = self.state.project.settings.frame_rate;
         let step = fps.frame_duration();
+        let typing = ctx.egui_wants_keyboard_input();
+        let (playhead, end) = (self.state.playhead, self.state.project.duration());
+        let mut seek = None;
+        let mut command: Option<fn(&mut Transport)> = None;
         ctx.input_mut(|i| {
-            if i.key_pressed(egui::Key::ArrowRight) {
-                self.state.set_playhead(self.state.playhead + step);
+            let plain =
+                |i: &egui::InputState, key| !typing && i.modifiers.is_none() && i.key_pressed(key);
+            if plain(i, egui::Key::ArrowRight) {
+                seek = Some(playhead + step);
             }
-            if i.key_pressed(egui::Key::ArrowLeft) {
-                self.state.set_playhead(self.state.playhead - step);
+            if plain(i, egui::Key::ArrowLeft) {
+                seek = Some(playhead - step);
             }
-            if i.key_pressed(egui::Key::Home) {
-                self.state.set_playhead(Time::ZERO);
+            if plain(i, egui::Key::ArrowUp) {
+                seek = playback::previous_edit(&self.state.project, playhead);
+            }
+            if plain(i, egui::Key::ArrowDown) {
+                seek = playback::next_edit(&self.state.project, playhead);
+            }
+            if plain(i, egui::Key::Home) {
+                seek = Some(Time::ZERO);
+            }
+            if plain(i, egui::Key::End) {
+                seek = Some(end);
+            }
+            if plain(i, egui::Key::Space) {
+                command = Some(Transport::toggle);
+            }
+            if plain(i, egui::Key::J) {
+                command = Some(Transport::reverse);
+            }
+            if plain(i, egui::Key::K) {
+                command = Some(Transport::pause);
+            }
+            if plain(i, egui::Key::L) {
+                command = Some(Transport::forward);
             }
             if i.consume_key(egui::Modifiers::COMMAND, egui::Key::S) {
                 self.actions.push(UiAction::Save);
@@ -329,6 +482,88 @@ impl FrameworkApp {
             if i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num0) {
                 self.state.zoom_to_fit(self.timeline_width);
             }
+        });
+        if let Some(t) = seek {
+            self.seek(t);
+        }
+        if let Some(command) = command {
+            self.transport_action(command);
+        }
+    }
+
+    fn transport_bar(&mut self, ui: &mut egui::Ui) {
+        let rate = self.state.project.settings.frame_rate;
+        let end = self.state.project.duration();
+        ui.horizontal(|ui| {
+            if ui.button("⏮").on_hover_text("Go to start (Home)").clicked() {
+                self.seek(Time::ZERO);
+            }
+            if ui
+                .button("⏪")
+                .on_hover_text("Play backwards, press again for faster (J)")
+                .clicked()
+            {
+                self.transport_action(Transport::reverse);
+            }
+            let play = if self.transport.is_playing() {
+                "⏸"
+            } else {
+                "▶"
+            };
+            if ui
+                .button(play)
+                .on_hover_text("Play / pause (Space)")
+                .clicked()
+            {
+                self.transport_action(Transport::toggle);
+            }
+            if ui
+                .button("⏩")
+                .on_hover_text("Play forwards, press again for faster (L)")
+                .clicked()
+            {
+                self.transport_action(Transport::forward);
+            }
+            if ui.button("⏭").on_hover_text("Go to end (End)").clicked() {
+                self.seek(end);
+            }
+            ui.monospace(format!(
+                "{} / {}",
+                playback::timecode(self.state.playhead, rate),
+                playback::timecode(end, rate)
+            ));
+            if self.transport.is_playing() && self.transport.speed != 1.0 {
+                ui.label(
+                    egui::RichText::new(format!("{}×", self.transport.speed)).color(theme::ACCENT),
+                );
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let mut quality = self.preview_quality;
+                egui::ComboBox::from_id_salt("preview_fps")
+                    .selected_text(playback::fps_label(quality.max_fps))
+                    .show_ui(ui, |ui| {
+                        for fps in PREVIEW_FPS {
+                            ui.selectable_value(
+                                &mut quality.max_fps,
+                                fps,
+                                playback::fps_label(fps),
+                            );
+                        }
+                    });
+                egui::ComboBox::from_id_salt("preview_scale")
+                    .selected_text(quality.scale.label())
+                    .show_ui(ui, |ui| {
+                        for scale in PreviewScale::ALL {
+                            ui.selectable_value(&mut quality.scale, scale, scale.label());
+                        }
+                    })
+                    .response
+                    .on_hover_text("Preview resolution");
+                ui.label(egui::RichText::new("Preview").color(theme::TEXT_DIM));
+                if quality != self.preview_quality {
+                    self.set_preview_quality(quality);
+                }
+            });
         });
     }
 
@@ -454,6 +689,7 @@ impl FrameworkApp {
         egui::CentralPanel::no_frame()
             .frame(egui::Frame::new().fill(theme::BG))
             .show(ui, |ui| {
+                egui::Panel::bottom("transport").show(ui, |ui| self.transport_bar(ui));
                 let rect = ui.available_rect_before_wrap();
                 match &self.preview_texture {
                     Some(tex) => {
@@ -1350,5 +1586,134 @@ mod tests {
         app.touch();
         frame(&mut app, &ctx, vec![]);
         assert_eq!(app.state.project.tracks[0].clips.len(), before + 1);
+    }
+
+    fn press(app: &mut FrameworkApp, ctx: &egui::Context, k: egui::Key) {
+        frame(app, ctx, vec![key(k, Modifiers::NONE)]);
+    }
+
+    #[test]
+    fn transport_shortcuts_play_and_shuttle() {
+        let (ctx, mut app) = app_with_project();
+        let end = app.state.project.duration();
+        press(&mut app, &ctx, egui::Key::Space);
+        assert!(app.transport.is_playing());
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.state.playhead > Time::ZERO);
+        press(&mut app, &ctx, egui::Key::K);
+        assert!(!app.transport.is_playing());
+        press(&mut app, &ctx, egui::Key::L);
+        press(&mut app, &ctx, egui::Key::L);
+        assert_eq!(app.transport.speed, 2.0);
+        // Reverse from the start pauses at zero.
+        press(&mut app, &ctx, egui::Key::Home);
+        assert!(!app.transport.is_playing());
+        press(&mut app, &ctx, egui::Key::J);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.state.playhead, Time::ZERO);
+        assert!(!app.transport.is_playing());
+        // Playing at the end starts over; fast playback stops at the end.
+        press(&mut app, &ctx, egui::Key::End);
+        assert_eq!(app.state.playhead, end);
+        press(&mut app, &ctx, egui::Key::Space);
+        assert_eq!(app.state.playhead, Time::ZERO);
+        app.transport.speed = 1000.0;
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.state.playhead, end);
+        assert!(!app.transport.is_playing());
+        // Up/Down jump between edit points.
+        press(&mut app, &ctx, egui::Key::ArrowUp);
+        assert!(app.state.playhead < end);
+        let back = app.state.playhead;
+        press(&mut app, &ctx, egui::Key::ArrowDown);
+        assert!(app.state.playhead > back);
+    }
+
+    #[test]
+    fn playback_follows_the_audio_clock() {
+        let (ctx, mut app) = app_with_project();
+        let engine = Arc::new(AudioEngine::new(8000));
+        app.audio = Some(engine.clone());
+        press(&mut app, &ctx, egui::Key::Space);
+        let mut buf = vec![0.0; 800 * 2];
+        for _ in 0..200 {
+            engine.pull(&mut buf, 2);
+            if engine.position() >= Some(Time::from_seconds(0.5)) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(Some(app.state.playhead), engine.position());
+        // Clicking the timeline while playing restarts audio at the new position.
+        app.state.set_playhead(Time::from_seconds(2.0));
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(engine.position(), Some(Time::from_seconds(2.0)));
+        // Reaching the end through the audio clock stops playback.
+        let end = app.state.project.duration();
+        app.state.set_playhead(end - Time::from_seconds(0.01));
+        frame(&mut app, &ctx, vec![]);
+        for _ in 0..200 {
+            engine.pull(&mut buf, 2);
+            if engine.position() >= Some(end) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.state.playhead, end);
+        assert!(!app.transport.is_playing());
+        assert_eq!(engine.position(), None);
+        // Audio errors are reported.
+        app.state.project.media[2].path = "/missing.wav".into();
+        app.state.set_playhead(Time::ZERO);
+        press(&mut app, &ctx, egui::Key::Space);
+        for _ in 0..200 {
+            frame(&mut app, &ctx, vec![]);
+            if app.state.status.starts_with("Audio error") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(
+            app.state.status.starts_with("Audio error"),
+            "{}",
+            app.state.status
+        );
+    }
+
+    #[test]
+    fn transport_bar_and_preview_quality() {
+        let (ctx, mut app) = app_with_project();
+        frame(&mut app, &ctx, vec![]);
+        app.set_preview_quality(PreviewQuality {
+            scale: PreviewScale::Quarter,
+            max_fps: Some(10),
+        });
+        assert_eq!(app.preview_quality.scale, PreviewScale::Quarter);
+        app.set_preview_quality(PreviewQuality {
+            scale: PreviewScale::Quarter,
+            max_fps: None,
+        });
+        // Throttled preview requests while playing at 10 fps.
+        app.preview_quality.max_fps = Some(10);
+        app.transport_action(Transport::toggle);
+        for _ in 0..5 {
+            frame(&mut app, &ctx, vec![]);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        app.transport.speed = 4.0;
+        frame(&mut app, &ctx, vec![]);
+        // Transport buttons: click each one in the bar under the preview.
+        for x in (300..700).step_by(24) {
+            frame(&mut app, &ctx, click(pos2(x as f32, 500.0)));
+        }
+        app.perform(UiAction::New, &ctx);
+        assert!(!app.transport.is_playing());
     }
 }
