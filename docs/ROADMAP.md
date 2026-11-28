@@ -48,12 +48,15 @@ publishes a tagged release.
       rate). — [#2](https://github.com/very-doge-wow/framework/issues/2)
 - [ ] Real-time playback engine: GPU (wgpu) compositing, decoded-frame cache
       with look-ahead, 1080p multi-track at full frame rate. — [#2](https://github.com/very-doge-wow/framework/issues/2)
-- [ ] Timeline editing: move, trim, split/cut, ripple, snapping, multi-select,
-      add/remove/reorder lanes (including empty lanes), clip grouping/ungrouping
-      (video with its audio is imported onto separate lanes and grouped), time
-      zoom (buttons, Cmd/Ctrl +/−, Cmd/Ctrl + wheel), resizable panels, undo/redo
-      for every edit. Cut/split/trim via context menus, keyboard shortcuts and
-      draggable clip borders; Solo and Mute buttons on every lane. — [#3](https://github.com/very-doge-wow/framework/issues/3)
+- [x] Timeline editing: move (also across lanes), trim, split/cut, ripple
+      delete, snapping, multi-select, add/remove/reorder lanes (including empty
+      lanes), clip grouping/ungrouping (video with its audio is placed onto
+      separate lanes and grouped), time zoom (buttons, Cmd/Ctrl +/−, Cmd/Ctrl +
+      wheel), resizable panels, undo/redo for every edit. Cut/split/trim via
+      context menus, keyboard shortcuts and draggable clip borders; Solo and
+      Mute buttons on every lane. — [#3](https://github.com/very-doge-wow/framework/issues/3)
+- [ ] Timeline polish: ripple trim/insert, marquee selection, dragging media
+      from the pool onto lanes, vertical lane scrolling. — [#3](https://github.com/very-doge-wow/framework/issues/3)
 - [ ] Compositing: per-clip transform (position, scale, rotation, crop,
       opacity), keyframes, transparency for images (alpha).
       — [#4](https://github.com/very-doge-wow/framework/issues/4)

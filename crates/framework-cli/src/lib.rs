@@ -126,10 +126,8 @@ pub fn run(cli: Cli, out: &mut impl Write) -> Result<()> {
                 let file = std::fs::canonicalize(&file)
                     .with_context(|| format!("cannot open {}", file.display()))?;
                 let info = framework_media::probe(&file)?;
-                let kind = info.kind;
                 let id = project.add_media(MediaAsset::new(file, info));
-                let track = project.default_track_for(kind);
-                project.append_media(track, id)?;
+                project.place_media(id)?;
             }
             project.save(&path)?;
             writeln!(out, "wrote {}", path.display())?;

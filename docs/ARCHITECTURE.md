@@ -27,7 +27,15 @@ framework-app    egui/eframe desktop editor (wgpu renderer)
   sample rate divides it exactly, so frame/sample positions never drift.
 - `Project` → `MediaAsset`s (probed metadata) and `Track`s (lanes) holding
   non-overlapping `Clip`s (`start`, `source_in`, `duration`). For video
-  tracks, a higher index is composited on top.
+  tracks, a higher index is composited on top. Clips may share a `GroupId`
+  (moved, split and deleted together); `audio_detached` marks a video clip
+  whose audio sits on its own audio lane. Tracks have `muted` and `solo`
+  (`Project::lane_active`).
+- `edit` – all timeline edits (`split_clips`, `trim_start`/`trim_end`,
+  `move_clips`, `remove_clips` with ripple, groups, lanes, `place_media`).
+  Each either succeeds completely or leaves the project unchanged; the app
+  wraps them in `EditorState::edit`, which records one undo step per edit
+  (drags are one step via `begin_gesture`/`end_gesture`).
 - Project files are versioned JSON (`format_version`); newer versions are
   rejected with a clear error, migrations go in `Project::from_json`.
 - `ExportProfile`: container/codec/resolution/frame rate/bitrate plus the
