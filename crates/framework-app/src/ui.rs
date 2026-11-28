@@ -84,6 +84,8 @@ pub struct FrameworkApp {
     pub audio: Option<Arc<AudioEngine>>,
     audio_output: Option<AudioOutput>,
     audio_tried: bool,
+    /// Last audio clock reading and when it last changed, to detect a stalled device.
+    audio_clock: Option<(Time, Instant)>,
     pub preview_quality: PreviewQuality,
     wake: egui::Context,
 }
@@ -112,6 +114,7 @@ impl FrameworkApp {
             audio: None,
             audio_output: None,
             audio_tried: false,
+            audio_clock: None,
             preview_quality: PreviewQuality::default(),
             wake: ctx.clone(),
         };
@@ -155,7 +158,29 @@ impl FrameworkApp {
         self.state.set_playhead(t);
     }
 
+    /// False once the device has not consumed audio for a while (no working
+    /// output); playback then continues on the wall clock without sound.
+    fn audio_clock_running(&mut self, t: Time, now: Instant) -> bool {
+        match self.audio_clock {
+            Some((last, since)) if last == t => {
+                if now.duration_since(since) < AUDIO_STALL {
+                    return true;
+                }
+                self.audio = None;
+                self.audio_output = None;
+                self.audio_clock = None;
+                self.state.status = "No working audio output; playing without sound".into();
+                false
+            }
+            _ => {
+                self.audio_clock = Some((t, now));
+                true
+            }
+        }
+    }
+
     fn sync_audio(&mut self) {
+        self.audio_clock = None;
         if self.transport.speed == 1.0 {
             if self.audio.is_none() && !self.audio_tried && self.use_dialogs {
                 self.audio_tried = true;
@@ -189,7 +214,8 @@ impl FrameworkApp {
         let end = self.state.project.duration();
         let clock = (self.transport.speed == 1.0)
             .then(|| self.audio.as_ref().and_then(|a| a.position()))
-            .flatten();
+            .flatten()
+            .filter(|&t| self.audio_clock_running(t, now));
         self.state.playhead = match clock {
             Some(t) if t >= end => {
                 self.transport.pause();
@@ -495,36 +521,39 @@ impl FrameworkApp {
         let rate = self.state.project.settings.frame_rate;
         let end = self.state.project.duration();
         ui.horizontal(|ui| {
-            if ui.button("⏮").on_hover_text("Go to start (Home)").clicked() {
+            if icon_button(ui, Icon::Start)
+                .on_hover_text("Go to start (Home)")
+                .clicked()
+            {
                 self.seek(Time::ZERO);
             }
-            if ui
-                .button("⏪")
+            if icon_button(ui, Icon::Reverse)
                 .on_hover_text("Play backwards, press again for faster (J)")
                 .clicked()
             {
                 self.transport_action(Transport::reverse);
             }
             let play = if self.transport.is_playing() {
-                "⏸"
+                Icon::Pause
             } else {
-                "▶"
+                Icon::Play
             };
-            if ui
-                .button(play)
+            if icon_button(ui, play)
                 .on_hover_text("Play / pause (Space)")
                 .clicked()
             {
                 self.transport_action(Transport::toggle);
             }
-            if ui
-                .button("⏩")
+            if icon_button(ui, Icon::Forward)
                 .on_hover_text("Play forwards, press again for faster (L)")
                 .clicked()
             {
                 self.transport_action(Transport::forward);
             }
-            if ui.button("⏭").on_hover_text("Go to end (End)").clicked() {
+            if icon_button(ui, Icon::End)
+                .on_hover_text("Go to end (End)")
+                .clicked()
+            {
                 self.seek(end);
             }
             ui.monospace(format!(
@@ -1111,6 +1140,63 @@ impl eframe::App for FrameworkApp {
     }
 }
 
+/// How long the audio clock may stand still before playback falls back to the wall clock.
+const AUDIO_STALL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Transport icons, painted as vector shapes so they look the same everywhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Icon {
+    Start,
+    Reverse,
+    Play,
+    Pause,
+    Forward,
+    End,
+}
+
+fn icon_button(ui: &mut egui::Ui, icon: Icon) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(26.0, 22.0), Sense::click());
+    let painter = ui.painter();
+    if response.hovered() {
+        painter.rect_filled(rect, 4.0, ui.visuals().widgets.hovered.bg_fill);
+    }
+    let color = if response.hovered() {
+        Color32::WHITE
+    } else {
+        ui.visuals().text_color()
+    };
+    let c = rect.center();
+    // Triangle pointing towards x = `tip`, with its flat side at x = `base`.
+    let triangle = |tip: f32, base: f32| {
+        egui::Shape::convex_polygon(
+            vec![
+                Pos2::new(base, c.y - 5.0),
+                Pos2::new(tip, c.y),
+                Pos2::new(base, c.y + 5.0),
+            ],
+            color,
+            Stroke::NONE,
+        )
+    };
+    let bar = |x: f32| {
+        egui::Shape::rect_filled(
+            Rect::from_min_max(Pos2::new(x, c.y - 5.0), Pos2::new(x + 2.0, c.y + 5.0)),
+            0.0,
+            color,
+        )
+    };
+    let shapes = match icon {
+        Icon::Play => vec![triangle(c.x + 5.0, c.x - 4.0)],
+        Icon::Pause => vec![bar(c.x - 4.0), bar(c.x + 2.0)],
+        Icon::Reverse => vec![triangle(c.x - 7.0, c.x), triangle(c.x, c.x + 7.0)],
+        Icon::Forward => vec![triangle(c.x + 7.0, c.x), triangle(c.x, c.x - 7.0)],
+        Icon::Start => vec![bar(c.x - 6.0), triangle(c.x - 4.0, c.x + 5.0)],
+        Icon::End => vec![triangle(c.x + 4.0, c.x - 5.0), bar(c.x + 4.0)],
+    };
+    painter.extend(shapes);
+    response
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1685,6 +1771,22 @@ mod tests {
             "{}",
             app.state.status
         );
+    }
+
+    #[test]
+    fn stalled_audio_output_falls_back_to_the_wall_clock() {
+        let (ctx, mut app) = app_with_project();
+        app.audio = Some(Arc::new(AudioEngine::new(8000)));
+        press(&mut app, &ctx, egui::Key::Space);
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.state.playhead, Time::ZERO);
+        std::thread::sleep(AUDIO_STALL + std::time::Duration::from_millis(50));
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.audio.is_none());
+        assert!(app.state.status.contains("without sound"));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.state.playhead > Time::ZERO);
     }
 
     #[test]
