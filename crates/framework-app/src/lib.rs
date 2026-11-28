@@ -1,5 +1,7 @@
 //! The Framework desktop editor (egui/eframe with the wgpu renderer).
 
+pub mod audio_out;
+pub mod playback;
 pub mod state;
 pub mod theme;
 pub mod ui;

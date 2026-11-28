@@ -12,8 +12,9 @@ pub mod synthetic;
 mod video;
 
 pub use audio::AudioReader;
+pub use audio::OUTPUT_CHANNELS;
 pub use error::MediaError;
-pub use export::{ExportProgress, export};
+pub use export::{AudioMixer, ExportProgress, export};
 pub use preview::{PreviewRenderer, RgbaImage};
 pub use probe::{check_collectable, probe};
 pub use video::VideoReader;

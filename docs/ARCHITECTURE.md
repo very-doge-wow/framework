@@ -60,6 +60,13 @@ is shared by preview and export (transforms, opacity, keyframes).
   UI code is exercised headlessly in tests through `egui::Context::run`.
 - `worker` – `PreviewWorker` (latest-request-wins background rendering) and
   `ExportJob` (background export with progress and cancel).
+- `playback` – transport (play/pause, J/K/L shuttle), preview quality,
+  edit points and timecode, independent of egui.
+- `audio_out` – `AudioEngine` mixes the timeline (`framework_media::AudioMixer`,
+  shared with export) on a thread ahead of the sound device; `AudioOutput`
+  connects it to the default device with cpal. At normal speed the number of
+  samples the device has played is the clock the playhead follows, so video
+  stays in sync with audio; shuttle speeds use wall-clock time and are silent.
 
 ## FFmpeg and licensing
 

@@ -13,6 +13,7 @@ name = "framework"
 path = "src/main.rs"
 
 [dependencies]
+cpal.workspace = true
 eframe.workspace = true
 egui.workspace = true
 framework-core.workspace = true

@@ -42,31 +42,42 @@ publishes a tagged release.
 
 ## Phase 2 – Editor core (8–12 sessions)
 
-- [ ] Real-time playback engine: GPU (wgpu) compositing, frame cache, audio
-      output, A/V sync, J/K/L shuttle, selectable preview quality (resolution, frame rate). — [#2](https://github.com/very-doge-wow/framework/issues/2)
+- [x] Playback transport: play/pause, J/K/L shuttle (up to 8×, reverse),
+      frame and edit-point stepping, audio output with the audio clock driving
+      the video (A/V sync), selectable preview quality (resolution, frame
+      rate). — [#2](https://github.com/very-doge-wow/framework/issues/2)
+- [ ] Real-time playback engine: GPU (wgpu) compositing, decoded-frame cache
+      with look-ahead, 1080p multi-track at full frame rate. — [#2](https://github.com/very-doge-wow/framework/issues/2)
 - [ ] Timeline editing: move, trim, split/cut, ripple, snapping, multi-select,
       add/remove/reorder lanes (including empty lanes), clip grouping/ungrouping
       (video with its audio is imported onto separate lanes and grouped), time
       zoom (buttons, Cmd/Ctrl +/−, Cmd/Ctrl + wheel), resizable panels, undo/redo
-      for every edit. — [#3](https://github.com/very-doge-wow/framework/issues/3)
+      for every edit. Cut/split/trim via context menus, keyboard shortcuts and
+      draggable clip borders; Solo and Mute buttons on every lane. — [#3](https://github.com/very-doge-wow/framework/issues/3)
 - [ ] Compositing: per-clip transform (position, scale, rotation, crop,
-      opacity), keyframes, transparency for images (alpha), basic transitions.
+      opacity), keyframes, transparency for images (alpha).
       — [#4](https://github.com/very-doge-wow/framework/issues/4)
 - [ ] Media management: import of video/image/audio, thumbnails, waveforms,
       relinking missing media, optional proxy generation. — [#5](https://github.com/very-doge-wow/framework/issues/5)
-- [ ] Audio editing: clip gain, fades, track volume/mute/solo, level meters.
+- [ ] Transitions: cross dissolve, dip to colour, wipes, slide/push, zoom,
+      audio crossfade; draggable duration, editable in the inspector. — [#26](https://github.com/very-doge-wow/framework/issues/26)
+- [ ] Audio editing: clip gain, fades, per-lane volume (waveforms reflect the
+      gain), mute/solo, level meters.
       — [#6](https://github.com/very-doge-wow/framework/issues/6)
 - [ ] Effects system: per-clip and per-lane effect stacks (keyframable
       parameters, GPU rendered), one effect inspector next to the preview for
       every effect, and the **Effects** browser tab. — [#19](https://github.com/very-doge-wow/framework/issues/19)
 - [ ] Generators: solid colour and gradient clips (text via phase 3) and the
       **Generators** browser tab. — [#20](https://github.com/very-doge-wow/framework/issues/20)
-- [ ] Export UX: profile picker, custom profile editor (resolution, fps,
+- [x] Export UX: profile picker, custom profile editor (resolution, fps,
       bitrate), background rendering with progress and cancel. — [#7](https://github.com/very-doge-wow/framework/issues/7)
-- [ ] `.fwk` project file: Save (references) and Collect and save (embedded
+- [x] `.fwk` project file: Save (references) and Collect and save (embedded
       media). — [#22](https://github.com/very-doge-wow/framework/issues/22)
 - [ ] Keyboard shortcuts: full default set, remappable in Settings. — [#23](https://github.com/very-doge-wow/framework/issues/23)
 - [ ] Record audio and video from connected microphones and cameras. — [#24](https://github.com/very-doge-wow/framework/issues/24)
+- [ ] UI redesign: design system (palette, typography, spacing, motion),
+      bundled UI font and icon set, custom controls, cleaner layout; mockups
+      approved by the maintainer first. — [#29](https://github.com/very-doge-wow/framework/issues/29)
 
 Acceptance: a user can assemble, cut and layer a multi-track edit with images
 and music, play it back smoothly at 1080p, and export it.
@@ -85,6 +96,8 @@ and music, play it back smoothly at 1080p, and export it.
       natural skin tones (skin-tone detection weighting), cinematic (warm/teal
       bias), and user-adjustable strength.
 - [ ] Analysis runs in the background and results are cached per clip.
+- [ ] Colour grading: colour wheels, curves, `.cube` LUTs, HSL qualifiers,
+      scopes (waveform, parade, vectorscope, histogram), grade presets. — [#28](https://github.com/very-doge-wow/framework/issues/28)
 
 ## Phase 5 – Piece-to-camera mode (8–12 sessions)
 
@@ -110,7 +123,10 @@ compatible with GPL-3.0 redistribution.
 - [ ] Installers and signing: macOS notarised .dmg (universal), Windows signed
       installer, Linux AppImage/Flatpak; bit-for-bit reproducible release
       verification. — [#16](https://github.com/very-doge-wow/framework/issues/16)
-- [ ] UI/UX polish: themes, keyboard shortcuts, accessibility, onboarding. — [#17](https://github.com/very-doge-wow/framework/issues/17)
+- [ ] UI/UX polish: themes, keyboard shortcuts, accessibility, onboarding
+      (visual design in #29). — [#17](https://github.com/very-doge-wow/framework/issues/17)
+- [ ] In-app auto-update from GitHub Releases with checksum verification.
+      Manual install commands: [INSTALLING.md](INSTALLING.md). — [#27](https://github.com/very-doge-wow/framework/issues/27)
 
 ## Later
 
