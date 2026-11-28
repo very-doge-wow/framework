@@ -6,6 +6,16 @@ use crate::{
 };
 use std::collections::{HashMap, HashSet};
 
+/// `delta`, or zero when the bounds would push an edge against the drag
+/// direction (e.g. a group member already shorter than the minimum).
+fn towards(wanted: Time, delta: Time) -> Time {
+    if delta.flicks().signum() == wanted.flicks().signum() {
+        delta
+    } else {
+        Time::ZERO
+    }
+}
+
 /// Far beyond any real timeline, used as "no limit".
 const UNLIMITED: Time = Time::from_flicks(i64::MAX / 4);
 
@@ -153,7 +163,7 @@ impl Project {
             lower = lower.max(lo - s);
             upper = upper.min(hi - s);
         }
-        let delta = (t - start).min(upper).max(lower);
+        let delta = towards(t - start, (t - start).min(upper).max(lower));
         for m in members {
             let clip = self.clip_mut(m)?;
             clip.start += delta;
@@ -176,7 +186,7 @@ impl Project {
             lower = lower.max(lo - e);
             upper = upper.min(hi - e);
         }
-        let delta = (t - end).max(lower).min(upper);
+        let delta = towards(t - end, (t - end).max(lower).min(upper));
         for m in members {
             self.clip_mut(m)?.duration += delta;
         }
@@ -522,6 +532,17 @@ mod tests {
         assert_eq!(p.clip(d).unwrap().source_in, s(0.0));
         assert_eq!(p.trim_end(d, s(20.0), min).unwrap(), s(6.0));
         assert_eq!(p.clip(b).unwrap().start, s(6.0));
+        // A sub-frame member never makes an inward drag extend the group.
+        let tiny = Time::from_flicks(10);
+        let piece = p.split_clips(&[d], p.clip(d).unwrap().end() - tiny)[0];
+        let other = p.clip(piece).unwrap().group;
+        assert!(other.is_some());
+        let partner = p.split_clips(&[a], p.clip(a).unwrap().end() - tiny)[0];
+        assert_eq!(p.clip(partner).unwrap().group, other);
+        let start = p.clip(partner).unwrap().start;
+        assert_eq!(p.trim_start(partner, start + s(1.0), min).unwrap(), start);
+        let end = p.clip(partner).unwrap().end();
+        assert_eq!(p.trim_end(partner, end - s(1.0), min).unwrap(), end);
     }
 
     #[test]
