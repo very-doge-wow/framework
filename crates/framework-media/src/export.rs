@@ -226,7 +226,7 @@ pub(crate) fn top_video_clip(project: &Project, t: Time) -> Option<(&Clip, &Medi
         .tracks
         .iter()
         .rev()
-        .filter(|tr| tr.kind == TrackKind::Video && !tr.hidden)
+        .filter(|tr| tr.kind == TrackKind::Video && !tr.hidden && project.lane_active(tr))
         .find_map(|tr| tr.clip_at(t))
         .and_then(|clip| project.media(clip.media).map(|m| (clip, m)))
 }
@@ -259,12 +259,15 @@ impl AudioMixer {
     pub fn mix(&mut self, project: &Project, s0: i64, out: &mut [f32]) -> Result<(), MediaError> {
         let n = (out.len() / OUTPUT_CHANNELS) as i64;
         let s1 = s0 + n;
-        for track in project.tracks.iter().filter(|t| !t.muted) {
+        for track in project.tracks.iter().filter(|t| project.lane_active(t)) {
             for clip in &track.clips {
                 let Some(asset) = project.media(clip.media) else {
                     continue;
                 };
-                if asset.kind() == MediaKind::Image || asset.info.audio.is_none() {
+                if asset.kind() == MediaKind::Image
+                    || asset.info.audio.is_none()
+                    || clip.audio_detached
+                {
                     continue;
                 }
                 let cs = clip.start.to_samples(self.rate);
