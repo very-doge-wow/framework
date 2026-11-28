@@ -231,20 +231,32 @@ pub(crate) fn top_video_clip(project: &Project, t: Time) -> Option<(&Clip, &Medi
         .and_then(|clip| project.media(clip.media).map(|m| (clip, m)))
 }
 
-struct AudioMixer<'a> {
-    project: &'a Project,
+/// Mixes the audio of all unmuted tracks, keeping decoders open between calls.
+/// Shared by export and editor playback.
+pub struct AudioMixer {
     rate: u32,
     readers: HashMap<ClipId, AudioReader>,
 }
 
-impl AudioMixer<'_> {
+impl AudioMixer {
+    pub fn new(rate: u32) -> Self {
+        Self {
+            rate,
+            readers: HashMap::new(),
+        }
+    }
+
+    pub fn rate(&self) -> u32 {
+        self.rate
+    }
+
     /// Mixes all audible clips into `out` (interleaved stereo) starting at timeline sample `s0`.
-    fn mix(&mut self, s0: i64, out: &mut [f32]) -> Result<(), MediaError> {
+    pub fn mix(&mut self, project: &Project, s0: i64, out: &mut [f32]) -> Result<(), MediaError> {
         let n = (out.len() / OUTPUT_CHANNELS) as i64;
         let s1 = s0 + n;
-        for track in self.project.tracks.iter().filter(|t| !t.muted) {
+        for track in project.tracks.iter().filter(|t| !t.muted) {
             for clip in &track.clips {
-                let Some(asset) = self.project.media(clip.media) else {
+                let Some(asset) = project.media(clip.media) else {
                     continue;
                 };
                 if asset.kind() == MediaKind::Image || asset.info.audio.is_none() {
@@ -268,7 +280,6 @@ impl AudioMixer<'_> {
                 reader.mix_into(src, &mut out[range], 1.0)?;
             }
         }
-        let project = self.project;
         let rate = self.rate;
         self.readers.retain(|id, _| {
             project
@@ -331,11 +342,7 @@ fn render(
         profile.video.height,
     );
     let mut video_readers: HashMap<ClipId, VideoReader> = HashMap::new();
-    let mut mixer = AudioMixer {
-        project,
-        rate,
-        readers: HashMap::new(),
-    };
+    let mut mixer = AudioMixer::new(rate);
     let mut audio_pos = 0i64;
     let mut samples = Vec::with_capacity(frame_size as usize * OUTPUT_CHANNELS);
 
@@ -381,7 +388,7 @@ fn render(
             }
             samples.clear();
             samples.resize(n as usize * OUTPUT_CHANNELS, 0.0);
-            mixer.mix(audio_pos, &mut samples)?;
+            mixer.mix(project, audio_pos, &mut samples)?;
             muxer.write_audio(&samples, audio_pos)?;
             audio_pos += n;
         }
