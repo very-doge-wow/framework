@@ -124,7 +124,8 @@ impl Project {
         if self.source_length(clip).is_some() {
             lo = lo.max(clip.start - clip.source_in);
         }
-        let t = t.max(lo).min(clip.end() - min);
+        // Neighbours win over the minimum length, so a trim never overlaps.
+        let t = t.min(clip.end() - min).max(lo);
         let delta = t - clip.start;
         let clip = self.clip_mut(id)?;
         clip.start = t;
@@ -144,7 +145,7 @@ impl Project {
         if let Some(len) = self.source_length(clip) {
             hi = hi.min(clip.start + (len - clip.source_in));
         }
-        let t = t.min(hi).max(clip.start + min);
+        let t = t.max(clip.start + min).min(hi);
         let start = clip.start;
         self.clip_mut(id)?.duration = t - start;
         Ok(t)
@@ -409,6 +410,14 @@ mod tests {
             Err(ProjectError::UnknownClip(_))
         ));
         assert!(p.trim_end(ClipId::new(), s(0.0), min).is_err());
+        // A fragment shorter than `min` between two clips cannot grow into them.
+        let (mut p, a, b) = project();
+        p.trim_end(a, s(6.0), min).unwrap();
+        let tiny = Time::from_flicks(10);
+        let piece = p.split_clips(&[a], s(6.0) - tiny)[0];
+        assert_eq!(p.trim_end(piece, s(5.0), min).unwrap(), s(6.0));
+        assert_eq!(p.trim_start(piece, s(7.0), min).unwrap(), s(6.0) - tiny);
+        assert_eq!(p.clip(b).unwrap().start, s(6.0));
     }
 
     #[test]
