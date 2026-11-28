@@ -24,6 +24,8 @@ struct Inner {
     quit: bool,
     /// The mixer thread is waiting without any open media files.
     idle: bool,
+    /// Frames between the device callback and the speaker.
+    latency: i64,
 }
 
 struct Shared {
@@ -135,7 +137,14 @@ impl AudioEngine {
         let g = self.shared.inner.lock().expect("audio lock");
         g.project
             .as_ref()
-            .map(|_| Time::from_samples(g.start + g.consumed, self.rate))
+            .map(|_| Time::from_samples(g.start + (g.consumed - g.latency).max(0), self.rate))
+    }
+
+    /// Output latency reported by the device; the clock lags by it so the
+    /// picture matches what is heard.
+    pub fn set_latency(&self, latency: std::time::Duration) {
+        let frames = (latency.as_secs_f64() * f64::from(self.rate)) as i64;
+        self.shared.inner.lock().expect("audio lock").latency = frames;
     }
 
     /// A mixing error since the last call; playback stops on errors.
@@ -221,7 +230,9 @@ fn build<T: cpal::SizedSample + cpal::FromSample<f32>>(
     device
         .build_output_stream(
             *config,
-            move |data: &mut [T], _| {
+            move |data: &mut [T], info: &cpal::OutputCallbackInfo| {
+                let ts = info.timestamp();
+                engine.set_latency(ts.playback.duration_since(ts.callback));
                 scratch.resize(data.len(), 0.0);
                 engine.pull(&mut scratch, channels);
                 for (d, s) in data.iter_mut().zip(&scratch) {
@@ -284,6 +295,14 @@ mod tests {
         assert!(mono.iter().any(|s| *s != 0.0));
         let surround = pull_until_audible(&engine, 6);
         assert!(surround.chunks(6).all(|f| f[2..].iter().all(|s| *s == 0.0)));
+
+        // The clock lags by the device latency.
+        let before = engine.position().unwrap();
+        engine.set_latency(std::time::Duration::from_millis(10));
+        assert_eq!(
+            before - engine.position().unwrap(),
+            Time::from_samples(80, 8000)
+        );
 
         engine.stop();
         assert_eq!(engine.position(), None);
