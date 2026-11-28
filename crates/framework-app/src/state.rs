@@ -242,8 +242,8 @@ impl EditorState {
             .collect();
     }
 
-    /// Selected clips (with their groups) under the playhead, or all clips
-    /// under the playhead when none of the selection is there.
+    /// Selected clips (with their groups) under the playhead; without a
+    /// selection, all clips under the playhead.
     fn clips_at_playhead(&self) -> Vec<ClipId> {
         let t = self.playhead;
         let under = |id: &ClipId| self.project.clip(*id).is_some_and(|c| c.contains(t));
@@ -253,7 +253,7 @@ impl EditorState {
             .into_iter()
             .filter(under)
             .collect();
-        if !selected.is_empty() {
+        if !self.selected_clips.is_empty() {
             return selected;
         }
         let all: Vec<ClipId> = self
@@ -750,6 +750,20 @@ mod tests {
             st.selected_clips
                 .iter()
                 .all(|c| st.project.clip(*c).is_some())
+        );
+    }
+
+    #[test]
+    fn playhead_edits_use_the_selection() {
+        let (mut st, a, b) = editable();
+        // At the cut after the selected clip, nothing else is trimmed.
+        st.selected_clips = vec![a];
+        st.set_playhead(Time::from_seconds(3.0));
+        assert!(!st.trim_to_playhead(false));
+        assert!(!st.split_at_playhead());
+        assert_eq!(
+            st.project.clip(b).unwrap().duration,
+            Time::from_seconds(2.0)
         );
     }
 
