@@ -4,7 +4,7 @@ use crate::state::{EditorState, MAX_ZOOM, MIN_ZOOM};
 use crate::theme;
 use crate::worker::{ExportJob, ExportState, PreviewWorker};
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle, Vec2};
-use framework_core::{MediaKind, PROJECT_EXTENSION, SaveMode, Time, TrackKind};
+use framework_core::{ClipId, MediaKind, PROJECT_EXTENSION, SaveMode, Time, TrackId, TrackKind};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -72,6 +72,11 @@ pub struct FrameworkApp {
     pub actions: Vec<UiAction>,
     /// Width of the timeline's time area in the last frame, for zoom steps and fitting.
     timeline_width: f32,
+    drag: Option<ClipDrag>,
+    pub snapping: bool,
+    /// On-screen clip and lane-header rectangles of the last frame.
+    pub clip_rects: Vec<(ClipId, Rect)>,
+    pub lane_rects: Vec<(TrackId, Rect)>,
     /// Action waiting for the user to resolve unsaved changes.
     pub pending: Option<UiAction>,
     /// When false, file dialogs are skipped and no sound device is opened (tests).
@@ -108,6 +113,10 @@ impl FrameworkApp {
             browser_tab: BrowserTab::Media,
             actions: Vec::new(),
             timeline_width: 0.0,
+            drag: None,
+            snapping: true,
+            clip_rects: Vec::new(),
+            lane_rects: Vec::new(),
             pending: None,
             use_dialogs: true,
             transport: Transport::default(),
@@ -469,6 +478,7 @@ impl FrameworkApp {
         let (playhead, end) = (self.state.playhead, self.state.project.duration());
         let mut seek = None;
         let mut command: Option<fn(&mut Transport)> = None;
+        let mut edits = Vec::new();
         ctx.input_mut(|i| {
             let plain =
                 |i: &egui::InputState, key| !typing && i.modifiers.is_none() && i.key_pressed(key);
@@ -502,6 +512,42 @@ impl FrameworkApp {
             if plain(i, egui::Key::L) {
                 command = Some(Transport::forward);
             }
+            if !typing {
+                use TimelineCommand as C;
+                let shift_cmd = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
+                // Shifted variants first: consume_key ignores an unrequested Shift.
+                let bindings = [
+                    (shift_cmd, egui::Key::Z, C::Redo),
+                    (shift_cmd, egui::Key::G, C::Ungroup),
+                    (egui::Modifiers::COMMAND, egui::Key::Z, C::Undo),
+                    (egui::Modifiers::COMMAND, egui::Key::Y, C::Redo),
+                    (egui::Modifiers::COMMAND, egui::Key::G, C::Group),
+                    (egui::Modifiers::COMMAND, egui::Key::B, C::Split),
+                    (egui::Modifiers::COMMAND, egui::Key::A, C::SelectAll),
+                    (egui::Modifiers::SHIFT, egui::Key::Delete, C::RippleDelete),
+                    (
+                        egui::Modifiers::SHIFT,
+                        egui::Key::Backspace,
+                        C::RippleDelete,
+                    ),
+                ];
+                for (modifiers, key, c) in bindings {
+                    if i.consume_key(modifiers, key) {
+                        edits.push(c);
+                    }
+                }
+                for (key, c) in [
+                    (egui::Key::S, C::Split),
+                    (egui::Key::Q, C::TrimStart),
+                    (egui::Key::W, C::TrimEnd),
+                    (egui::Key::Delete, C::Delete),
+                    (egui::Key::Backspace, C::Delete),
+                ] {
+                    if plain(i, key) {
+                        edits.push(c);
+                    }
+                }
+            }
             if i.consume_key(egui::Modifiers::COMMAND, egui::Key::S) {
                 self.actions.push(UiAction::Save);
             }
@@ -526,6 +572,9 @@ impl FrameworkApp {
         }
         if let Some(command) = command {
             self.transport_action(command);
+        }
+        for edit in edits {
+            self.timeline_command(edit);
         }
     }
 
@@ -754,21 +803,74 @@ impl FrameworkApp {
             .default_size(height.max(200.0))
             .size_range(120.0..=f32::INFINITY)
             .show(ui, |ui| {
-                self.timeline_toolbar(ui);
-                let (rect, response) =
-                    ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+                let mut commands = Vec::new();
+                self.timeline_toolbar(ui, &mut commands);
+                let rect = ui.available_rect_before_wrap();
+                let response = ui.allocate_rect(rect, Sense::click_and_drag());
                 self.timeline_input(ui, rect, &response);
+                self.timeline_clips(ui, rect, &mut commands);
+                for command in commands {
+                    self.timeline_command(command);
+                }
                 self.paint_timeline(ui, rect);
             });
     }
 
-    fn timeline_toolbar(&mut self, ui: &mut egui::Ui) {
+    fn timeline_toolbar(&mut self, ui: &mut egui::Ui, commands: &mut Vec<TimelineCommand>) {
         let cmd = if cfg!(target_os = "macos") {
             "Cmd"
         } else {
             "Ctrl"
         };
         ui.horizontal(|ui| {
+            let mut button = |ui: &mut egui::Ui, enabled: bool, label: &str, tip: String, c| {
+                if ui
+                    .add_enabled(enabled, egui::Button::new(label))
+                    .on_hover_text(tip)
+                    .clicked()
+                {
+                    commands.push(c);
+                }
+            };
+            button(
+                ui,
+                self.state.can_undo(),
+                "Undo",
+                format!("Undo ({cmd} Z)"),
+                TimelineCommand::Undo,
+            );
+            button(
+                ui,
+                self.state.can_redo(),
+                "Redo",
+                format!("Redo ({cmd} Shift Z)"),
+                TimelineCommand::Redo,
+            );
+            ui.separator();
+            button(
+                ui,
+                true,
+                "Split",
+                format!("Split at the playhead (S or {cmd} B)"),
+                TimelineCommand::Split,
+            );
+            button(
+                ui,
+                true,
+                "+ Video lane",
+                "Add an empty video lane".into(),
+                TimelineCommand::AddLane(TrackKind::Video),
+            );
+            button(
+                ui,
+                true,
+                "+ Audio lane",
+                "Add an empty audio lane".into(),
+                TimelineCommand::AddLane(TrackKind::Audio),
+            );
+            ui.toggle_value(&mut self.snapping, "Snap")
+                .on_hover_text("Snap clips to clip edges and the playhead");
+            ui.separator();
             ui.label(egui::RichText::new("Zoom").color(theme::TEXT_DIM));
             let width = self.timeline_width;
             if ui
@@ -803,6 +905,9 @@ impl FrameworkApp {
         {
             self.state
                 .set_playhead(self.state.x_to_time(pos.x - origin));
+            if response.clicked() && pos.y > rect.top() + RULER_HEIGHT {
+                self.state.selected_clips.clear();
+            }
         }
         if response.hovered() {
             // Cmd/Ctrl + wheel and pinch arrive as zoom_delta.
@@ -819,9 +924,297 @@ impl FrameworkApp {
         }
     }
 
+    /// Track indices in on-screen order (highest video lane first, then the
+    /// audio lanes) with their row rectangles.
+    fn lane_layout(&self, rect: Rect) -> Vec<(usize, Rect)> {
+        let mut order = self.state.project.lanes_of(TrackKind::Video);
+        order.reverse();
+        order.extend(self.state.project.lanes_of(TrackKind::Audio));
+        order
+            .into_iter()
+            .enumerate()
+            .map(|(row, i)| {
+                let top = rect.top() + RULER_HEIGHT + row as f32 * TRACK_HEIGHT;
+                (
+                    i,
+                    Rect::from_min_size(
+                        Pos2::new(rect.left(), top),
+                        Vec2::new(rect.width(), TRACK_HEIGHT - 2.0),
+                    ),
+                )
+            })
+            .collect()
+    }
+
+    /// Visible part of a clip in a lane, `None` when scrolled out of view.
+    fn clip_rect(&self, rect: Rect, lane: Rect, clip: &framework_core::Clip) -> Option<Rect> {
+        let origin = rect.left() + HEADER_WIDTH;
+        let x0 = origin + self.state.time_to_x(clip.start);
+        let x1 = origin + self.state.time_to_x(clip.end());
+        (x1 >= origin && x0 <= rect.right()).then(|| {
+            Rect::from_min_max(
+                Pos2::new(x0.max(origin), lane.top() + 3.0),
+                Pos2::new(x1.min(rect.right()), lane.top() + TRACK_HEIGHT - 5.0),
+            )
+        })
+    }
+
+    /// Mute and solo buttons in a lane header.
+    fn lane_buttons(header: Rect) -> (Rect, Rect) {
+        let m = Rect::from_min_size(
+            Pos2::new(header.left() + 6.0, header.center().y + 1.0),
+            Vec2::new(20.0, 15.0),
+        );
+        (m, m.translate(Vec2::new(24.0, 0.0)))
+    }
+
+    /// Lane headers and clip interactions: selection, drag to move, edge
+    /// drags to trim, context menus.
+    fn timeline_clips(&mut self, ui: &egui::Ui, rect: Rect, commands: &mut Vec<TimelineCommand>) {
+        let modifiers = ui.input(|i| i.modifiers);
+        let rows: Vec<_> = self
+            .lane_layout(rect)
+            .into_iter()
+            .map(|(i, lane)| {
+                let track = &self.state.project.tracks[i];
+                let clips: Vec<_> = track
+                    .clips
+                    .iter()
+                    .filter_map(|c| Some((c.id, self.clip_rect(rect, lane, c)?)))
+                    .collect();
+                (track.id, track.kind, lane, clips)
+            })
+            .collect();
+        self.clip_rects.clear();
+        self.lane_rects.clear();
+        let mut select = None;
+        let mut start_drag = None;
+        for (track, kind, lane, clips) in rows {
+            let header =
+                Rect::from_min_size(lane.min, Vec2::new(HEADER_WIDTH - 4.0, lane.height()));
+            self.lane_rects.push((track, header));
+            ui.interact(header, ui.scope_id().with(("lane", track)), Sense::click())
+                .context_menu(|ui| lane_menu(ui, track, kind, commands));
+            let (mute, solo) = Self::lane_buttons(header);
+            let tip = match kind {
+                TrackKind::Video => "Mute: hide this lane",
+                TrackKind::Audio => "Mute: silence this lane",
+            };
+            if ui
+                .interact(mute, ui.scope_id().with(("mute", track)), Sense::click())
+                .on_hover_text(tip)
+                .clicked()
+            {
+                commands.push(TimelineCommand::Mute(track));
+            }
+            if ui
+                .interact(solo, ui.scope_id().with(("solo", track)), Sense::click())
+                .on_hover_text("Solo: play only soloed lanes of this kind")
+                .clicked()
+            {
+                commands.push(TimelineCommand::Solo(track));
+            }
+            for (id, r) in clips {
+                self.clip_rects.push((id, r));
+                let body =
+                    ui.interact(r, ui.scope_id().with(("clip", id)), Sense::click_and_drag());
+                let edge = EDGE_PX.min(r.width() / 3.0);
+                let left = ui.interact(
+                    Rect::from_min_max(r.min, Pos2::new(r.left() + edge, r.bottom())),
+                    ui.scope_id().with(("trim-start", id)),
+                    Sense::drag(),
+                );
+                let right = ui.interact(
+                    Rect::from_min_max(Pos2::new(r.right() - edge, r.top()), r.max),
+                    ui.scope_id().with(("trim-end", id)),
+                    Sense::drag(),
+                );
+                for (response, kind) in [
+                    (&body, DragKind::Move),
+                    (&left, DragKind::TrimStart),
+                    (&right, DragKind::TrimEnd),
+                ] {
+                    if response.drag_started()
+                        && let Some(pos) = response.interact_pointer_pos()
+                    {
+                        start_drag = Some(ClipDrag {
+                            kind,
+                            clip: id,
+                            origin: pos,
+                        });
+                    }
+                }
+                if left.hovered() || right.hovered() || left.dragged() || right.dragged() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                } else if body.dragged() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                } else if body.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                }
+                if body.clicked() {
+                    select = Some((id, modifiers.shift || modifiers.command));
+                }
+                if body.secondary_clicked() && !self.state.selected_clips.contains(&id) {
+                    select = Some((id, false));
+                }
+                body.context_menu(|ui| clip_menu(ui, commands));
+            }
+        }
+        if let Some((id, additive)) = select {
+            self.state.select_clip(id, additive);
+        }
+        if let Some(drag) = start_drag {
+            if !self.state.selected_clips.contains(&drag.clip) {
+                self.state
+                    .select_clip(drag.clip, modifiers.shift || modifiers.command);
+            }
+            self.state.begin_gesture();
+            self.drag = Some(drag);
+        }
+        if let Some(drag) = self.drag {
+            if ui.input(|i| i.pointer.primary_down()) {
+                self.update_drag(ui, drag);
+            } else {
+                let label = match drag.kind {
+                    DragKind::Move => "Moved",
+                    DragKind::TrimStart | DragKind::TrimEnd => "Trimmed",
+                };
+                self.state.end_gesture(label);
+                self.drag = None;
+            }
+        }
+    }
+
+    /// Re-applies the ongoing drag to the project as it was when the drag started.
+    fn update_drag(&mut self, ui: &egui::Ui, drag: ClipDrag) {
+        let (Some(pos), Some(before)) = (
+            ui.input(|i| i.pointer.interact_pos()),
+            self.state.gesture_start().cloned(),
+        ) else {
+            return;
+        };
+        let Some(clip) = before.clip(drag.clip).cloned() else {
+            return;
+        };
+        let zoom = f64::from(self.state.zoom);
+        let dx = Time::from_seconds(f64::from(pos.x - drag.origin.x) / zoom);
+        let ids = if self.state.selected_clips.contains(&clip.id) {
+            self.state.selected_clips.clone()
+        } else {
+            vec![clip.id]
+        };
+        let moving = match drag.kind {
+            DragKind::Move => before.with_groups(&ids),
+            _ => vec![clip.id],
+        };
+        let mut points: Vec<Time> = before
+            .tracks
+            .iter()
+            .flat_map(|t| &t.clips)
+            .filter(|c| !moving.contains(&c.id))
+            .flat_map(|c| [c.start, c.end()])
+            .collect();
+        points.extend([Time::ZERO, self.state.playhead]);
+        let threshold = Time::from_seconds(f64::from(SNAP_PX) / zoom);
+        // Smallest correction that puts one of `edges` onto a snap point.
+        let snap = |edges: &[Time]| -> Time {
+            if !self.snapping {
+                return Time::ZERO;
+            }
+            edges
+                .iter()
+                .flat_map(|e| points.iter().map(move |p| *p - *e))
+                .filter(|d| d.flicks().abs() <= threshold.flicks())
+                .min_by_key(|d| d.flicks().abs())
+                .unwrap_or(Time::ZERO)
+        };
+        let min = self.state.min_clip_length();
+        let mut project = before.clone();
+        let result = match drag.kind {
+            DragKind::Move => {
+                let earliest = moving
+                    .iter()
+                    .filter_map(|id| before.clip(*id))
+                    .map(|c| c.start)
+                    .min()
+                    .unwrap_or(Time::ZERO);
+                let mut delta = dx + snap(&[clip.start + dx, clip.end() + dx]);
+                delta = delta.max(-earliest);
+                let rows = ((pos.y - drag.origin.y) / TRACK_HEIGHT).round() as isize;
+                let video = before
+                    .locate(clip.id)
+                    .is_some_and(|(t, _)| before.tracks[t].kind == TrackKind::Video);
+                // Video lanes are drawn top-down from the highest track index.
+                let shift = if video { -rows } else { rows };
+                project.move_clips(&ids, delta, shift).or_else(|_| {
+                    project = before.clone();
+                    project.move_clips(&ids, delta, 0)
+                })
+            }
+            DragKind::TrimStart => {
+                let t = clip.start + dx;
+                project.trim_start(clip.id, t + snap(&[t]), min).map(|_| ())
+            }
+            DragKind::TrimEnd => {
+                let t = clip.end() + dx;
+                project.trim_end(clip.id, t + snap(&[t]), min).map(|_| ())
+            }
+        };
+        if result.is_ok() && project != self.state.project {
+            self.state.project = project;
+            self.touch();
+        }
+    }
+
+    /// Applies a timeline command from a shortcut, button or context menu.
+    pub fn timeline_command(&mut self, command: TimelineCommand) {
+        let st = &mut self.state;
+        match command {
+            TimelineCommand::Split => {
+                st.split_at_playhead();
+            }
+            TimelineCommand::TrimStart => {
+                st.trim_to_playhead(true);
+            }
+            TimelineCommand::TrimEnd => {
+                st.trim_to_playhead(false);
+            }
+            TimelineCommand::Delete => {
+                st.delete_selection(false);
+            }
+            TimelineCommand::RippleDelete => {
+                st.delete_selection(true);
+            }
+            TimelineCommand::Group => {
+                st.group_selection();
+            }
+            TimelineCommand::Ungroup => {
+                st.ungroup_selection();
+            }
+            TimelineCommand::SelectAll => st.select_all(),
+            TimelineCommand::Undo => {
+                st.undo();
+            }
+            TimelineCommand::Redo => {
+                st.redo();
+            }
+            TimelineCommand::AddLane(kind) => {
+                st.add_lane(kind);
+            }
+            TimelineCommand::RemoveLane(id) => {
+                st.remove_lane(id);
+            }
+            TimelineCommand::MoveLane(id, up) => {
+                st.move_lane(id, up);
+            }
+            TimelineCommand::Mute(id) => st.toggle_mute(id),
+            TimelineCommand::Solo(id) => st.toggle_solo(id),
+        }
+        self.touch();
+    }
+
     fn paint_timeline(&self, ui: &egui::Ui, rect: Rect) {
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 0.0, theme::BG);
         let origin = rect.left() + HEADER_WIDTH;
         let font = FontId::proportional(11.0);
 
@@ -854,56 +1247,86 @@ impl FrameworkApp {
             i += 1;
         }
 
-        // Lanes, top lane = highest video track, like most editors.
-        let mut lanes: Vec<_> = self.state.project.tracks.iter().collect();
-        lanes.sort_by_key(|t| t.kind == TrackKind::Audio);
-        let video_count = lanes.iter().filter(|t| t.kind == TrackKind::Video).count();
-        lanes[..video_count].reverse();
-        for (row, track) in lanes.iter().enumerate() {
-            let top = rect.top() + RULER_HEIGHT + row as f32 * TRACK_HEIGHT;
-            let lane = Rect::from_min_size(
-                Pos2::new(rect.left(), top),
-                Vec2::new(rect.width(), TRACK_HEIGHT - 2.0),
-            );
+        let project = &self.state.project;
+        let linked = project.with_groups(&self.state.selected_clips);
+        for (index, lane) in self.lane_layout(rect) {
+            let track = &project.tracks[index];
+            let active = project.lane_active(track);
             painter.rect_filled(lane, 4.0, theme::LANE);
             painter.text(
-                Pos2::new(rect.left() + 8.0, lane.center().y),
-                Align2::LEFT_CENTER,
+                Pos2::new(rect.left() + 8.0, lane.top() + 5.0),
+                Align2::LEFT_TOP,
                 &track.name,
                 FontId::proportional(13.0),
-                Color32::WHITE,
+                if active {
+                    Color32::WHITE
+                } else {
+                    theme::TEXT_DIM
+                },
             );
+            let header =
+                Rect::from_min_size(lane.min, Vec2::new(HEADER_WIDTH - 4.0, lane.height()));
+            let (mute, solo) = Self::lane_buttons(header);
+            for (r, label, on, color) in [
+                (mute, "M", track.muted, MUTE_COLOR),
+                (solo, "S", track.solo, SOLO_COLOR),
+            ] {
+                painter.rect_filled(r, 3.0, if on { color } else { theme::PANEL });
+                painter.text(
+                    r.center(),
+                    Align2::CENTER_CENTER,
+                    label,
+                    FontId::proportional(10.0),
+                    if on { Color32::BLACK } else { theme::TEXT_DIM },
+                );
+            }
             for clip in &track.clips {
-                let Some(asset) = self.state.project.media(clip.media) else {
+                let (Some(asset), Some(r)) =
+                    (project.media(clip.media), self.clip_rect(rect, lane, clip))
+                else {
                     continue;
                 };
-                let x0 = origin + self.state.time_to_x(clip.start);
-                let x1 = origin + self.state.time_to_x(clip.end());
-                if x1 < origin || x0 > rect.right() {
-                    continue;
-                }
-                let r = Rect::from_min_max(
-                    Pos2::new(x0.max(origin), top + 3.0),
-                    Pos2::new(x1, top + TRACK_HEIGHT - 5.0),
-                );
-                let fill = match asset.kind() {
+                let mut fill = match asset.kind() {
+                    _ if track.kind == TrackKind::Audio => theme::AUDIO_CLIP,
                     MediaKind::Video => theme::VIDEO_CLIP,
                     MediaKind::Image => theme::IMAGE_CLIP,
                     MediaKind::Audio => theme::AUDIO_CLIP,
                 };
+                if !active {
+                    fill = fill.gamma_multiply(0.4);
+                }
                 painter.rect_filled(r, 4.0, fill);
-                if self.state.selected_clip == Some(clip.id) {
+                let selected = self.state.selected_clips.contains(&clip.id);
+                if selected || linked.contains(&clip.id) {
+                    let width = if selected { 2.0 } else { 1.0 };
                     painter.rect_stroke(
                         r,
                         4.0,
-                        Stroke::new(2.0, Color32::WHITE),
+                        Stroke::new(width, Color32::WHITE),
                         StrokeKind::Inside,
                     );
                 }
-                painter.text(
-                    r.left_center() + Vec2::new(6.0, 0.0),
+                if selected && r.width() > 3.0 * EDGE_PX {
+                    // Trim handles.
+                    for x in [r.left() + 2.0, r.right() - 5.0] {
+                        painter.rect_filled(
+                            Rect::from_min_size(
+                                Pos2::new(x, r.center().y - 8.0),
+                                Vec2::new(3.0, 16.0),
+                            ),
+                            1.5,
+                            Color32::WHITE,
+                        );
+                    }
+                }
+                let mut name = asset.display_name();
+                if clip.group.is_some() {
+                    name = format!("⛓ {name}");
+                }
+                painter.with_clip_rect(r.shrink(2.0)).text(
+                    r.left_center() + Vec2::new(8.0, 0.0),
                     Align2::LEFT_CENTER,
-                    asset.display_name(),
+                    name,
                     font.clone(),
                     Color32::WHITE,
                 );
@@ -1149,6 +1572,134 @@ impl eframe::App for FrameworkApp {
         FrameworkApp::ui(self, ui);
         ui.ctx()
             .send_viewport_cmd(egui::ViewportCommand::Title(self.state.title()));
+    }
+}
+
+/// Width of the grab zone at each clip edge for trimming.
+const EDGE_PX: f32 = 6.0;
+/// Distance within which dragged clips snap to edges and the playhead.
+const SNAP_PX: f32 = 8.0;
+const MUTE_COLOR: Color32 = Color32::from_rgb(0xe0, 0x6c, 0x4c);
+const SOLO_COLOR: Color32 = Color32::from_rgb(0xe8, 0xc5, 0x47);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DragKind {
+    Move,
+    TrimStart,
+    TrimEnd,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ClipDrag {
+    kind: DragKind,
+    clip: ClipId,
+    origin: Pos2,
+}
+
+/// Timeline edits triggered by shortcuts, toolbar buttons and context menus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineCommand {
+    Split,
+    TrimStart,
+    TrimEnd,
+    Delete,
+    RippleDelete,
+    Group,
+    Ungroup,
+    SelectAll,
+    Undo,
+    Redo,
+    AddLane(TrackKind),
+    RemoveLane(TrackId),
+    /// Move a lane up (`true`) or down on screen.
+    MoveLane(TrackId, bool),
+    Mute(TrackId),
+    Solo(TrackId),
+}
+
+fn shortcut_label(cmd: bool, shift: bool, key: &str) -> String {
+    let mut s = String::new();
+    if cmd {
+        s.push_str(if cfg!(target_os = "macos") {
+            "Cmd "
+        } else {
+            "Ctrl "
+        });
+    }
+    if shift {
+        s.push_str("Shift ");
+    }
+    s + key
+}
+
+fn menu_item(ui: &mut egui::Ui, label: &str, shortcut: String) -> bool {
+    ui.add(egui::Button::new(label).shortcut_text(shortcut))
+        .clicked()
+}
+
+fn clip_menu(ui: &mut egui::Ui, commands: &mut Vec<TimelineCommand>) {
+    use TimelineCommand as C;
+    let items = [
+        (
+            "Split at playhead",
+            shortcut_label(false, false, "S"),
+            C::Split,
+        ),
+        (
+            "Trim start to playhead",
+            shortcut_label(false, false, "Q"),
+            C::TrimStart,
+        ),
+        (
+            "Trim end to playhead",
+            shortcut_label(false, false, "W"),
+            C::TrimEnd,
+        ),
+        ("Delete", shortcut_label(false, false, "Del"), C::Delete),
+        (
+            "Ripple delete",
+            shortcut_label(false, true, "Del"),
+            C::RippleDelete,
+        ),
+        ("Group", shortcut_label(true, false, "G"), C::Group),
+        ("Ungroup", shortcut_label(true, true, "G"), C::Ungroup),
+    ];
+    for (i, (label, shortcut, command)) in items.into_iter().enumerate() {
+        if i == 3 || i == 5 {
+            ui.separator();
+        }
+        if menu_item(ui, label, shortcut) {
+            commands.push(command);
+            ui.close();
+        }
+    }
+}
+
+fn lane_menu(
+    ui: &mut egui::Ui,
+    track: TrackId,
+    kind: TrackKind,
+    commands: &mut Vec<TimelineCommand>,
+) {
+    use TimelineCommand as C;
+    let items = [
+        ("Add video lane", C::AddLane(TrackKind::Video)),
+        ("Add audio lane", C::AddLane(TrackKind::Audio)),
+        ("Move lane up", C::MoveLane(track, true)),
+        ("Move lane down", C::MoveLane(track, false)),
+        (
+            match kind {
+                TrackKind::Video => "Delete video lane",
+                TrackKind::Audio => "Delete audio lane",
+            },
+            C::RemoveLane(track),
+        ),
+    ];
+    for (label, command) in items {
+        if ui.button(label).clicked() {
+            commands.push(command);
+            ui.close();
+        }
     }
 }
 
@@ -1419,7 +1970,7 @@ mod tests {
     #[test]
     fn renders_all_panels_and_receives_preview() {
         let (ctx, mut app) = app_with_project();
-        app.state.selected_clip = Some(app.state.project.tracks[0].clips[0].id);
+        app.state.selected_clips = vec![app.state.project.tracks[0].clips[0].id];
         for _ in 0..200 {
             frame(&mut app, &ctx, vec![]);
             if app.preview_texture.is_some() {

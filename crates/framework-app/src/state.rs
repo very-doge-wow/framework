@@ -1,10 +1,15 @@
-use framework_core::{ClipId, ExportProfile, MediaAsset, MediaId, Project, SaveMode, Time};
+use framework_core::{
+    ClipId, ExportProfile, MediaAsset, MediaId, Project, ProjectError, SaveMode, Time, TrackId,
+    TrackKind,
+};
 use std::path::{Path, PathBuf};
 
 pub const MIN_ZOOM: f32 = 0.01;
 pub const MAX_ZOOM: f32 = 2000.0;
 /// Zoom factor of one zoom-in/zoom-out step (buttons and shortcuts).
 pub const ZOOM_STEP: f32 = 1.25;
+/// Number of undo steps kept.
+pub const HISTORY: usize = 200;
 
 /// Compact ruler label: `m:ss`, with tenths when the step is below a second.
 pub fn ruler_label(t: Time, step: f64) -> String {
@@ -36,7 +41,8 @@ pub struct EditorState {
     /// Timeline horizontal scroll offset in seconds.
     pub scroll: f64,
     pub selected_media: Option<MediaId>,
-    pub selected_clip: Option<ClipId>,
+    /// Selected clips (clips grouped with them are edited along).
+    pub selected_clips: Vec<ClipId>,
     pub status: String,
     pub dirty: bool,
     pub profiles: Vec<ExportProfile>,
@@ -45,6 +51,10 @@ pub struct EditorState {
     /// Settings used for the next export (a copy of the preset, possibly edited).
     pub export_settings: ExportProfile,
     pub export_path: String,
+    undo_stack: Vec<Project>,
+    redo_stack: Vec<Project>,
+    /// Project before an ongoing drag, committed as one undo step when it ends.
+    gesture: Option<Project>,
 }
 
 impl Default for EditorState {
@@ -62,13 +72,16 @@ impl EditorState {
             zoom: 80.0,
             scroll: 0.0,
             selected_media: None,
-            selected_clip: None,
+            selected_clips: Vec::new(),
             status: "Ready".into(),
             dirty: false,
             export_settings: ExportProfile::builtin()[0].clone(),
             profiles: ExportProfile::builtin(),
             export_profile: Some(0),
             export_path: "export.mp4".into(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            gesture: None,
         }
     }
 
@@ -107,23 +120,276 @@ impl EditorState {
         imported
     }
 
-    /// Appends the selected media to the end of its default track.
+    /// Appends the selected media to the end of the timeline; video with
+    /// audio goes onto a video and an audio lane, grouped.
     pub fn append_selected_media(&mut self) -> Option<ClipId> {
         let id = self.selected_media?;
-        let kind = self.project.media(id)?.kind();
-        let track = self.project.default_track_for(kind);
-        match self.project.append_media(track, id) {
-            Ok(clip) => {
-                self.selected_clip = Some(clip);
-                self.dirty = true;
-                self.status = "Added clip to timeline".into();
-                Some(clip)
+        let clips = self.edit("Added clip to timeline", |p| p.place_media(id))?;
+        self.selected_clips = clips.clone();
+        clips.first().copied()
+    }
+
+    /// Applies `f` as one undoable step. On error the project is left
+    /// unchanged and the error is shown in the status bar.
+    pub fn edit<R>(
+        &mut self,
+        label: &str,
+        f: impl FnOnce(&mut Project) -> Result<R, ProjectError>,
+    ) -> Option<R> {
+        let before = self.project.clone();
+        match f(&mut self.project) {
+            Ok(r) => {
+                if self.project != before {
+                    self.push_undo(before);
+                    self.status = label.into();
+                }
+                Some(r)
             }
             Err(e) => {
+                self.project = before;
                 self.status = e.to_string();
                 None
             }
         }
+    }
+
+    fn push_undo(&mut self, before: Project) {
+        self.undo_stack.push(before);
+        if self.undo_stack.len() > HISTORY {
+            self.undo_stack.remove(0);
+        }
+        self.redo_stack.clear();
+        self.dirty = true;
+    }
+
+    /// Starts a drag; the changes until [`Self::end_gesture`] form one undo step.
+    pub fn begin_gesture(&mut self) {
+        if self.gesture.is_none() {
+            self.gesture = Some(self.project.clone());
+        }
+    }
+
+    /// The project as it was when the ongoing drag started.
+    pub fn gesture_start(&self) -> Option<&Project> {
+        self.gesture.as_ref()
+    }
+
+    pub fn end_gesture(&mut self, label: &str) {
+        if let Some(before) = self.gesture.take()
+            && before != self.project
+        {
+            self.push_undo(before);
+            self.status = label.into();
+        }
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.undo_stack.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo_stack.is_empty()
+    }
+
+    pub fn undo(&mut self) -> bool {
+        let Some(previous) = self.undo_stack.pop() else {
+            return false;
+        };
+        let current = std::mem::replace(&mut self.project, previous);
+        self.redo_stack.push(current);
+        self.after_history_step("Undo");
+        true
+    }
+
+    pub fn redo(&mut self) -> bool {
+        let Some(next) = self.redo_stack.pop() else {
+            return false;
+        };
+        let current = std::mem::replace(&mut self.project, next);
+        self.undo_stack.push(current);
+        self.after_history_step("Redo");
+        true
+    }
+
+    fn after_history_step(&mut self, label: &str) {
+        let project = &self.project;
+        self.selected_clips.retain(|c| project.clip(*c).is_some());
+        self.dirty = true;
+        self.status = label.into();
+    }
+
+    /// Selects a clip; `additive` toggles it in the current selection.
+    pub fn select_clip(&mut self, id: ClipId, additive: bool) {
+        if !additive {
+            self.selected_clips = vec![id];
+        } else if let Some(i) = self.selected_clips.iter().position(|c| *c == id) {
+            self.selected_clips.remove(i);
+        } else {
+            self.selected_clips.push(id);
+        }
+    }
+
+    pub fn select_all(&mut self) {
+        self.selected_clips = self
+            .project
+            .tracks
+            .iter()
+            .flat_map(|t| &t.clips)
+            .map(|c| c.id)
+            .collect();
+    }
+
+    /// Selected clips (with their groups) under the playhead, or all clips
+    /// under the playhead when none of the selection is there.
+    fn clips_at_playhead(&self) -> Vec<ClipId> {
+        let t = self.playhead;
+        let under = |id: &ClipId| self.project.clip(*id).is_some_and(|c| c.contains(t));
+        let selected: Vec<ClipId> = self
+            .project
+            .with_groups(&self.selected_clips)
+            .into_iter()
+            .filter(under)
+            .collect();
+        if !selected.is_empty() {
+            return selected;
+        }
+        let all: Vec<ClipId> = self
+            .project
+            .tracks
+            .iter()
+            .flat_map(|tr| &tr.clips)
+            .map(|c| c.id)
+            .filter(under)
+            .collect();
+        self.project
+            .with_groups(&all)
+            .into_iter()
+            .filter(under)
+            .collect()
+    }
+
+    /// Cuts the clips under the playhead (see [`Self::clips_at_playhead`]).
+    pub fn split_at_playhead(&mut self) -> bool {
+        let ids = self.clips_at_playhead();
+        let t = self.playhead;
+        self.edit("Split", |p| {
+            let created = p.split_clips(&ids, t);
+            if created.is_empty() {
+                Err(ProjectError::InvalidEdit("no clip under the playhead"))
+            } else {
+                Ok(())
+            }
+        })
+        .is_some()
+    }
+
+    /// Trims the start (`start`) or end of the clips under the playhead to it.
+    pub fn trim_to_playhead(&mut self, start: bool) -> bool {
+        let ids = self.clips_at_playhead();
+        let (t, min) = (self.playhead, self.min_clip_length());
+        let label = if start {
+            "Trimmed start"
+        } else {
+            "Trimmed end"
+        };
+        self.edit(label, |p| {
+            if ids.is_empty() {
+                return Err(ProjectError::InvalidEdit("no clip under the playhead"));
+            }
+            for id in &ids {
+                if start {
+                    p.trim_start(*id, t, min)?;
+                } else {
+                    p.trim_end(*id, t, min)?;
+                }
+            }
+            Ok(())
+        })
+        .is_some()
+    }
+
+    /// Shortest clip a trim can leave: one frame.
+    pub fn min_clip_length(&self) -> Time {
+        self.project.settings.frame_rate.frame_duration()
+    }
+
+    /// Deletes the selected clips; `ripple` closes the gaps.
+    pub fn delete_selection(&mut self, ripple: bool) -> bool {
+        let ids = std::mem::take(&mut self.selected_clips);
+        let label = if ripple { "Ripple delete" } else { "Deleted" };
+        self.edit(label, |p| match p.remove_clips(&ids, ripple) {
+            0 => Err(ProjectError::InvalidEdit("nothing selected")),
+            _ => Ok(()),
+        })
+        .is_some()
+    }
+
+    pub fn group_selection(&mut self) -> bool {
+        let ids = self.selected_clips.clone();
+        self.edit("Grouped", |p| p.group_clips(&ids)).is_some()
+    }
+
+    pub fn ungroup_selection(&mut self) -> bool {
+        let ids = self.selected_clips.clone();
+        self.edit("Ungrouped", |p| match p.ungroup_clips(&ids) {
+            0 => Err(ProjectError::InvalidEdit("the selection is not grouped")),
+            _ => Ok(()),
+        })
+        .is_some()
+    }
+
+    /// Adds an empty lane on top of the lanes of its kind.
+    pub fn add_lane(&mut self, kind: TrackKind) -> Option<TrackId> {
+        self.edit("Added lane", |p| {
+            let index = match kind {
+                TrackKind::Video => p.lanes_of(TrackKind::Video).last().map_or(0, |i| i + 1),
+                TrackKind::Audio => p.tracks.len(),
+            };
+            Ok(p.insert_track(kind, index))
+        })
+    }
+
+    pub fn remove_lane(&mut self, id: TrackId) -> bool {
+        self.edit("Deleted lane", |p| p.remove_track(id).map(|_| ()))
+            .is_some()
+    }
+
+    /// Moves a lane one step up (`up`) or down on screen.
+    pub fn move_lane(&mut self, id: TrackId, up: bool) -> bool {
+        self.edit("Moved lane", |p| {
+            // Video lanes are drawn top-down from the highest track index.
+            let video = p.track(id).is_some_and(|t| t.kind == TrackKind::Video);
+            if p.move_track(id, up == video) {
+                Ok(())
+            } else {
+                Err(ProjectError::InvalidEdit("the lane cannot move further"))
+            }
+        })
+        .is_some()
+    }
+
+    pub fn toggle_mute(&mut self, id: TrackId) {
+        self.edit("Toggled mute", |p| {
+            let t = p
+                .tracks
+                .iter_mut()
+                .find(|t| t.id == id)
+                .ok_or(ProjectError::UnknownTrack(id))?;
+            t.muted = !t.muted;
+            Ok(())
+        });
+    }
+
+    pub fn toggle_solo(&mut self, id: TrackId) {
+        self.edit("Toggled solo", |p| {
+            let t = p
+                .tracks
+                .iter_mut()
+                .find(|t| t.id == id)
+                .ok_or(ProjectError::UnknownTrack(id))?;
+            t.solo = !t.solo;
+            Ok(())
+        });
     }
 
     pub fn set_playhead(&mut self, t: Time) {
@@ -275,7 +541,10 @@ mod tests {
         assert!(s.dirty);
         assert!(s.title().ends_with("• — Framework"));
         let clip = s.append_selected_media().unwrap();
-        assert_eq!(s.selected_clip, Some(clip));
+        assert_eq!(s.selected_clips[0], clip);
+        // Video with audio lands on a video and an audio lane, grouped.
+        assert_eq!(s.selected_clips.len(), 2);
+        assert!(s.project.clip(clip).unwrap().group.is_some());
         assert_eq!(s.project.media[0].kind(), MediaKind::Video);
 
         let path = tmp("p.fwk");
@@ -397,5 +666,127 @@ mod tests {
         assert_eq!(s.selected_profile().name, "Custom");
         s.sync_custom_profile();
         assert_eq!(s.selected_profile().id, "custom");
+    }
+
+    fn editable() -> (EditorState, ClipId, ClipId) {
+        use framework_core::{Clip, MediaInfo};
+        let mut p = Project::new("e");
+        let m = p.add_media(MediaAsset::new(
+            "still.png",
+            MediaInfo {
+                kind: MediaKind::Image,
+                duration: None,
+                video: None,
+                audio: None,
+            },
+        ));
+        let v1 = p.tracks[0].id;
+        let s = Time::from_seconds;
+        let a = p
+            .add_clip(v1, Clip::new(m, s(0.0), s(0.0), s(2.0)))
+            .unwrap();
+        let b = p
+            .add_clip(v1, Clip::new(m, s(3.0), s(0.0), s(2.0)))
+            .unwrap();
+        (EditorState::new(p), a, b)
+    }
+
+    #[test]
+    fn edits_undo_and_redo() {
+        let (mut st, a, b) = editable();
+        let s = Time::from_seconds;
+        assert!(!st.can_undo() && !st.can_redo());
+        assert!(!st.undo() && !st.redo());
+        // Split under the playhead without a selection.
+        st.set_playhead(s(1.0));
+        assert!(st.split_at_playhead());
+        assert_eq!(st.project.tracks[0].clips.len(), 3);
+        assert!(st.dirty && st.can_undo());
+        assert!(st.undo());
+        assert_eq!(st.project.tracks[0].clips.len(), 2);
+        assert!(st.redo());
+        assert_eq!(st.project.tracks[0].clips.len(), 3);
+        st.set_playhead(s(2.5));
+        assert!(!st.split_at_playhead());
+        assert!(st.status.contains("no clip"));
+        // Trims at the playhead apply to the selected clip.
+        st.select_clip(b, false);
+        st.set_playhead(s(4.0));
+        assert!(st.trim_to_playhead(true));
+        assert_eq!(st.project.clip(b).unwrap().start, s(4.0));
+        st.set_playhead(s(4.5));
+        assert!(st.trim_to_playhead(false));
+        assert_eq!(st.project.clip(b).unwrap().end(), s(4.5));
+        st.set_playhead(s(10.0));
+        assert!(!st.trim_to_playhead(false));
+        // Selection, grouping, deleting.
+        st.select_clip(a, true);
+        assert_eq!(st.selected_clips, vec![b, a]);
+        st.select_clip(b, true);
+        assert_eq!(st.selected_clips, vec![a]);
+        assert!(!st.group_selection());
+        assert!(!st.ungroup_selection());
+        st.select_all();
+        assert_eq!(st.selected_clips.len(), 3);
+        assert!(st.group_selection());
+        assert!(st.ungroup_selection());
+        st.selected_clips = vec![a];
+        assert!(st.delete_selection(true));
+        assert!(st.selected_clips.is_empty());
+        assert!(!st.delete_selection(false));
+        assert!(st.undo());
+        assert!(st.project.clip(a).is_some());
+        // Undo drops selected clips that no longer exist.
+        st.selected_clips = vec![a];
+        st.undo();
+        st.undo();
+        st.redo();
+        st.redo();
+        st.redo();
+        assert!(
+            st.selected_clips
+                .iter()
+                .all(|c| st.project.clip(*c).is_some())
+        );
+    }
+
+    #[test]
+    fn gestures_and_lanes() {
+        let (mut st, a, _) = editable();
+        let s = Time::from_seconds;
+        st.begin_gesture();
+        st.begin_gesture();
+        assert!(st.gesture_start().is_some());
+        st.project.move_clips(&[a], s(0.5), 0).unwrap();
+        st.end_gesture("Moved");
+        assert_eq!(st.status, "Moved");
+        assert!(st.undo());
+        assert_eq!(st.project.clip(a).unwrap().start, s(0.0));
+        // A gesture without changes adds no undo step.
+        st.begin_gesture();
+        st.end_gesture("Nothing");
+        assert!(!st.can_undo());
+
+        let v2 = st.add_lane(TrackKind::Video).unwrap();
+        let a2 = st.add_lane(TrackKind::Audio).unwrap();
+        assert_eq!(st.project.tracks[1].id, v2);
+        assert_eq!(st.project.tracks.last().unwrap().id, a2);
+        // V2 is drawn above V1: moving it up is impossible, down works.
+        assert!(!st.move_lane(v2, true));
+        assert!(st.move_lane(v2, false));
+        assert_eq!(st.project.tracks[0].id, v2);
+        assert!(st.move_lane(a2, true));
+        st.toggle_mute(a2);
+        st.toggle_solo(a2);
+        let track = st.project.track(a2).unwrap();
+        assert!(track.muted && track.solo);
+        st.toggle_mute(TrackId::new());
+        st.toggle_solo(TrackId::new());
+        assert!(st.remove_lane(a2));
+        assert!(!st.remove_lane(a2));
+        for _ in 0..HISTORY + 5 {
+            st.toggle_mute(v2);
+        }
+        assert_eq!(st.undo_stack.len(), HISTORY);
     }
 }
