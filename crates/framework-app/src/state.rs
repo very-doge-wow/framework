@@ -397,14 +397,14 @@ impl EditorState {
         });
     }
 
+    /// Solo is exclusive: soloing a lane un-solos the other lanes of its kind.
     pub fn toggle_solo(&mut self, id: TrackId) {
         self.edit("Toggled solo", |p| {
-            let t = p
-                .tracks
-                .iter_mut()
-                .find(|t| t.id == id)
-                .ok_or(ProjectError::UnknownTrack(id))?;
-            t.solo = !t.solo;
+            let t = p.track(id).ok_or(ProjectError::UnknownTrack(id))?;
+            let (kind, solo) = (t.kind, !t.solo);
+            for t in p.tracks.iter_mut().filter(|t| t.kind == kind) {
+                t.solo = solo && t.id == id;
+            }
             Ok(())
         });
     }
@@ -883,6 +883,20 @@ mod tests {
         st.toggle_solo(a2);
         let track = st.project.track(a2).unwrap();
         assert!(track.muted && track.solo);
+        // Soloing another audio lane un-solos A2; video lanes are unaffected.
+        let a1 = st
+            .project
+            .tracks
+            .iter()
+            .find(|t| t.kind == TrackKind::Audio && t.id != a2)
+            .unwrap()
+            .id;
+        st.toggle_solo(v2);
+        st.toggle_solo(a1);
+        assert!(!st.project.track(a2).unwrap().solo);
+        assert!(st.project.track(a1).unwrap().solo && st.project.track(v2).unwrap().solo);
+        st.toggle_solo(a1);
+        assert!(!st.project.track(a1).unwrap().solo);
         st.toggle_mute(TrackId::new());
         st.toggle_solo(TrackId::new());
         assert!(st.remove_lane(a2));
