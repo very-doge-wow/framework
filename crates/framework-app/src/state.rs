@@ -183,6 +183,9 @@ impl EditorState {
         }
     }
 
+    // Undo and redo restore the timeline (tracks) only: the media bin and
+    // where media is stored (e.g. embedded by Collect and save) stay current.
+
     pub fn can_undo(&self) -> bool {
         !self.undo_stack.is_empty()
     }
@@ -192,21 +195,21 @@ impl EditorState {
     }
 
     pub fn undo(&mut self) -> bool {
-        let Some(previous) = self.undo_stack.pop() else {
+        let Some(mut previous) = self.undo_stack.pop() else {
             return false;
         };
-        let current = std::mem::replace(&mut self.project, previous);
-        self.redo_stack.push(current);
+        std::mem::swap(&mut self.project.tracks, &mut previous.tracks);
+        self.redo_stack.push(previous);
         self.after_history_step("Undo");
         true
     }
 
     pub fn redo(&mut self) -> bool {
-        let Some(next) = self.redo_stack.pop() else {
+        let Some(mut next) = self.redo_stack.pop() else {
             return false;
         };
-        let current = std::mem::replace(&mut self.project, next);
-        self.undo_stack.push(current);
+        std::mem::swap(&mut self.project.tracks, &mut next.tracks);
+        self.undo_stack.push(next);
         self.after_history_step("Redo");
         true
     }
@@ -748,6 +751,22 @@ mod tests {
                 .iter()
                 .all(|c| st.project.clip(*c).is_some())
         );
+    }
+
+    #[test]
+    fn undo_keeps_the_media_bin() {
+        let (mut st, a, _) = editable();
+        st.selected_clips = vec![a];
+        assert!(st.delete_selection(false));
+        let mut asset = st.project.media[0].clone();
+        asset.id = MediaId::new();
+        st.project.add_media(asset);
+        st.project.media[0].path = "collected.png".into();
+        assert!(st.undo());
+        assert!(st.project.clip(a).is_some());
+        assert_eq!(st.project.media.len(), 2);
+        assert!(st.redo());
+        assert_eq!(st.project.media[0].path, PathBuf::from("collected.png"));
     }
 
     #[test]
