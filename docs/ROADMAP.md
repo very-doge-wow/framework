@@ -48,12 +48,15 @@ publishes a tagged release.
       rate). — [#2](https://github.com/very-doge-wow/framework/issues/2)
 - [ ] Real-time playback engine: GPU (wgpu) compositing, decoded-frame cache
       with look-ahead, 1080p multi-track at full frame rate. — [#2](https://github.com/very-doge-wow/framework/issues/2)
-- [ ] Timeline editing: move, trim, split/cut, ripple, snapping, multi-select,
-      add/remove/reorder lanes (including empty lanes), clip grouping/ungrouping
-      (video with its audio is imported onto separate lanes and grouped), time
-      zoom (buttons, Cmd/Ctrl +/−, Cmd/Ctrl + wheel), resizable panels, undo/redo
-      for every edit. Cut/split/trim via context menus, keyboard shortcuts and
-      draggable clip borders; Solo and Mute buttons on every lane. — [#3](https://github.com/very-doge-wow/framework/issues/3)
+- [x] Timeline editing: move (also across lanes), trim, split/cut, ripple
+      delete, snapping, multi-select, add/remove/reorder lanes (including empty
+      lanes), clip grouping/ungrouping (video with its audio is placed onto
+      separate lanes and grouped), time zoom (buttons, Cmd/Ctrl +/−, Cmd/Ctrl +
+      wheel), resizable panels, undo/redo for every edit. Cut/split/trim via
+      context menus, keyboard shortcuts and draggable clip borders; Solo and
+      Mute buttons on every lane. — [#3](https://github.com/very-doge-wow/framework/issues/3)
+- [ ] Timeline polish: ripple trim/insert, marquee selection, dragging media
+      from the pool onto lanes, vertical lane scrolling. — [#3](https://github.com/very-doge-wow/framework/issues/3)
 - [ ] Compositing: per-clip transform (position, scale, rotation, crop,
       opacity), keyframes, transparency for images (alpha).
       — [#4](https://github.com/very-doge-wow/framework/issues/4)
@@ -127,6 +130,15 @@ compatible with GPL-3.0 redistribution.
       (visual design in #29). — [#17](https://github.com/very-doge-wow/framework/issues/17)
 - [ ] In-app auto-update from GitHub Releases with checksum verification.
       Manual install commands: [INSTALLING.md](INSTALLING.md). — [#27](https://github.com/very-doge-wow/framework/issues/27)
+
+## CI hardening (cross-cutting)
+
+- [ ] Security scans: RustSec advisories, FFmpeg/x264 CVEs, npm audit,
+      workflow analysis, CodeQL, SBOM per release. — [#32](https://github.com/very-doge-wow/framework/issues/32)
+- [ ] Secret scanning: gitleaks on PRs and full history, GitHub push
+      protection. — [#33](https://github.com/very-doge-wow/framework/issues/33)
+- [ ] Lint job: Rust (fmt, clippy, docs), shell, Markdown, workflows, TOML,
+      spelling; `scripts/lint.sh` for local runs. — [#34](https://github.com/very-doge-wow/framework/issues/34)
 
 ## Later
 

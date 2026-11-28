@@ -27,6 +27,10 @@ pub enum ProjectError {
     IncompatibleTrack { media: MediaKind, track: TrackKind },
     #[error("clip overlaps an existing clip on the same track")]
     Overlap,
+    #[error("unknown clip id {0}")]
+    UnknownClip(ClipId),
+    #[error("{0}")]
+    InvalidEdit(&'static str),
 }
 
 macro_rules! id_type {
@@ -60,6 +64,7 @@ macro_rules! id_type {
 id_type!(MediaId);
 id_type!(TrackId);
 id_type!(ClipId);
+id_type!(GroupId);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -185,6 +190,13 @@ pub struct Clip {
     /// Offset into the source media where the clip begins.
     pub source_in: Time,
     pub duration: Time,
+    /// Grouped clips are moved, split and deleted together.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<GroupId>,
+    /// Set on a video clip whose audio was placed on its own audio lane, so
+    /// it is not mixed twice.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub audio_detached: bool,
 }
 
 impl Clip {
@@ -195,6 +207,8 @@ impl Clip {
             start,
             source_in,
             duration,
+            group: None,
+            audio_detached: false,
         }
     }
 
@@ -227,6 +241,9 @@ pub struct Track {
     pub muted: bool,
     #[serde(default)]
     pub hidden: bool,
+    /// While any lane of a kind is soloed, only soloed lanes of that kind play.
+    #[serde(default)]
+    pub solo: bool,
     /// Clips sorted by start time, never overlapping.
     pub clips: Vec<Clip>,
 }
@@ -239,6 +256,7 @@ impl Track {
             name: name.into(),
             muted: false,
             hidden: false,
+            solo: false,
             clips: Vec::new(),
         }
     }
@@ -251,7 +269,7 @@ impl Track {
         self.clips.iter().find(|c| c.contains(t))
     }
 
-    fn insert_sorted(&mut self, clip: Clip) -> Result<(), ProjectError> {
+    pub(crate) fn insert_sorted(&mut self, clip: Clip) -> Result<(), ProjectError> {
         if self
             .clips
             .iter()
