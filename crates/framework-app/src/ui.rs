@@ -86,6 +86,8 @@ pub struct FrameworkApp {
     audio_tried: bool,
     /// Last audio clock reading and when it last changed, to detect a stalled device.
     audio_clock: Option<(Time, Instant)>,
+    /// Project revision the audio engine is playing.
+    audio_revision: u64,
     pub preview_quality: PreviewQuality,
     wake: egui::Context,
 }
@@ -115,6 +117,7 @@ impl FrameworkApp {
             audio_output: None,
             audio_tried: false,
             audio_clock: None,
+            audio_revision: 0,
             preview_quality: PreviewQuality::default(),
             wake: ctx.clone(),
         };
@@ -180,6 +183,7 @@ impl FrameworkApp {
     }
 
     fn sync_audio(&mut self) {
+        self.audio_revision = self.project_revision;
         self.audio_clock = None;
         if self.transport.speed == 1.0 {
             if self.audio.is_none() && !self.audio_tried && self.use_dialogs {
@@ -203,7 +207,9 @@ impl FrameworkApp {
             self.last_tick = None;
             return;
         }
-        if self.state.playhead != self.ticked_playhead {
+        // Seeks and edits during playback restart audio from the playhead.
+        let edited = self.transport.speed == 1.0 && self.audio_revision != self.project_revision;
+        if self.state.playhead != self.ticked_playhead || edited {
             self.sync_audio();
         }
         let now = Instant::now();
@@ -1740,6 +1746,10 @@ mod tests {
         }
         frame(&mut app, &ctx, vec![]);
         assert_eq!(Some(app.state.playhead), engine.position());
+        // Edits while playing restart audio with the new project.
+        app.touch();
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.audio_revision, app.project_revision);
         // Clicking the timeline while playing restarts audio at the new position.
         app.state.set_playhead(Time::from_seconds(2.0));
         frame(&mut app, &ctx, vec![]);
