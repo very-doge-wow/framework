@@ -7,6 +7,10 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
+/// Largest sample sent to the device: integer formats cannot represent +1.0
+/// (24-bit output would wrap to full-scale negative).
+const MAX_SAMPLE: f32 = 1.0 - 1.0 / 8_388_608.0;
+
 /// Frames mixed per step.
 const CHUNK: usize = 1024;
 
@@ -236,7 +240,7 @@ fn build<T: cpal::SizedSample + cpal::FromSample<f32>>(
                 scratch.resize(data.len(), 0.0);
                 engine.pull(&mut scratch, channels);
                 for (d, s) in data.iter_mut().zip(&scratch) {
-                    *d = T::from_sample(*s);
+                    *d = T::from_sample(s.clamp(-1.0, MAX_SAMPLE));
                 }
             },
             |e| tracing::warn!("audio output: {e}"),
