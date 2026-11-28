@@ -910,9 +910,7 @@ impl FrameworkApp {
                 i.pointer.primary_down(),
             )
         });
-        if !down {
-            self.marquee = None;
-        }
+        let pointer = ui.input(|i| i.pointer.interact_pos());
         // Dragging across empty lane space draws a selection box.
         if response.drag_started()
             && let Some(p) = press.filter(|p| in_lanes(*p))
@@ -929,7 +927,8 @@ impl FrameworkApp {
             });
         }
         if let Some(m) = &mut self.marquee {
-            if let Some(pos) = response.interact_pointer_pos() {
+            // Includes the release position on the frame the button goes up.
+            if let Some(pos) = pointer {
                 m.current = pos;
             }
             let area = Rect::from_two_pos(m.origin, m.current);
@@ -940,16 +939,17 @@ impl FrameworkApp {
                 }
             }
             self.state.selected_clips = selection;
-        } else if let Some(pos) = response.interact_pointer_pos()
-            && pos.x >= origin
-        {
-            // The ruler scrubs; empty lane space moves the playhead on click.
-            if !in_lanes(pos) {
-                self.state
-                    .set_playhead(self.state.x_to_time(pos.x - origin));
-            } else if response.clicked() {
-                self.state
-                    .set_playhead(self.state.x_to_time(pos.x - origin));
+            if !down {
+                self.marquee = None;
+            }
+        } else if let Some(pos) = response.interact_pointer_pos() {
+            let t = self.state.x_to_time((pos.x - origin).max(0.0));
+            // A press in the ruler scrubs, also when the drag moves over the
+            // lanes; empty lane space moves the playhead on click.
+            if press.is_some_and(|p| p.x >= origin && !in_lanes(p)) {
+                self.state.set_playhead(t);
+            } else if response.clicked() && in_lanes(pos) {
+                self.state.set_playhead(t);
                 self.state.selected_clips.clear();
             }
         }
@@ -2676,6 +2676,40 @@ mod tests {
             vec![Event::ModifiersChanged(Modifiers::NONE)],
         );
         assert_eq!(app.state.selected_clips.len(), 3);
+        // The release position counts, even when it differs from the last move.
+        let from = pos2(i.right() + 40.0, i.center().y);
+        frame(
+            &mut app,
+            &ctx,
+            vec![
+                Event::PointerMoved(from),
+                pointer(from, PointerButton::Primary, true),
+            ],
+        );
+        frame(
+            &mut app,
+            &ctx,
+            vec![Event::PointerMoved(from + vec2(-20.0, 0.0))],
+        );
+        frame(
+            &mut app,
+            &ctx,
+            vec![Event::PointerMoved(from + vec2(-30.0, 0.0))],
+        );
+        frame(
+            &mut app,
+            &ctx,
+            vec![pointer(i.center(), PointerButton::Primary, false)],
+        );
+        assert_eq!(app.state.selected_clips, vec![image]);
+        assert_eq!(app.state.playhead, playhead);
+        // Scrubbing from the ruler continues over the lanes.
+        let ruler = pos2(i.left(), v.top() - 3.0 - RULER_HEIGHT / 2.0);
+        drag(&mut app, &ctx, ruler, pos2(i.center().x, i.center().y));
+        let expected = app
+            .state
+            .x_to_time(i.center().x - (app.lane_rects[0].1.left() + HEADER_WIDTH));
+        assert!((app.state.playhead - expected).flicks().abs() < Time::from_seconds(0.05).flicks());
         // A grouped clip shows its link icon.
         app.timeline_command(TimelineCommand::Group);
         frame(&mut app, &ctx, vec![]);
