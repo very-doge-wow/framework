@@ -326,6 +326,53 @@ impl Project {
         !track.muted && (track.solo || !self.tracks.iter().any(|t| t.kind == track.kind && t.solo))
     }
 
+    /// First lane of `kind` without clips, adding one (on top of the video
+    /// lanes, or below the audio lanes) when every lane is in use.
+    pub fn empty_lane(&mut self, kind: TrackKind) -> TrackId {
+        if let Some(t) = self
+            .tracks
+            .iter()
+            .find(|t| t.kind == kind && t.clips.is_empty())
+        {
+            return t.id;
+        }
+        let index = match kind {
+            TrackKind::Video => self.lanes_of(TrackKind::Video).last().map_or(0, |i| i + 1),
+            TrackKind::Audio => self.tracks.len(),
+        };
+        self.insert_track(kind, index)
+    }
+
+    /// Places media at `start` on the first empty lane of its kind. Video
+    /// with audio also gets an empty audio lane, grouped with the picture.
+    pub fn place_media_at(
+        &mut self,
+        media: MediaId,
+        start: Time,
+    ) -> Result<Vec<ClipId>, ProjectError> {
+        let asset = self.media(media).ok_or(ProjectError::UnknownMedia(media))?;
+        let (kind, duration) = (asset.kind(), asset.default_clip_duration());
+        let linked = kind == MediaKind::Video && asset.info.audio.is_some();
+        let lane = self.empty_lane(match kind {
+            MediaKind::Audio => TrackKind::Audio,
+            _ => TrackKind::Video,
+        });
+        let mut clip = Clip::new(media, start, Time::ZERO, duration);
+        if !linked {
+            return Ok(vec![self.add_clip(lane, clip)?]);
+        }
+        let audio_lane = self.empty_lane(TrackKind::Audio);
+        let group = Some(GroupId::new());
+        clip.group = group;
+        clip.audio_detached = true;
+        let mut audio = Clip::new(media, start, Time::ZERO, duration);
+        audio.group = group;
+        Ok(vec![
+            self.add_clip(lane, clip)?,
+            self.add_clip(audio_lane, audio)?,
+        ])
+    }
+
     /// Appends media at the end of the timeline. Video with audio is placed on
     /// a video lane and an audio lane at the same time, grouped together.
     pub fn place_media(&mut self, media: MediaId) -> Result<Vec<ClipId>, ProjectError> {
@@ -559,6 +606,31 @@ mod tests {
         assert_eq!(all(&p), vec![false, true, false]);
         assert_eq!(p.remove_track(v2).unwrap().id, v2);
         assert!(p.remove_track(v2).is_err());
+    }
+
+    #[test]
+    fn place_media_at_uses_empty_lanes() {
+        let mut p = Project::new("t");
+        let av = p.add_media(asset(MediaKind::Video, Some(3.0), true));
+        let still = p.add_media(asset(MediaKind::Image, None, false));
+        let tone = p.add_media(asset(MediaKind::Audio, Some(2.0), true));
+        let first = p.place_media_at(av, s(1.0)).unwrap();
+        assert_eq!(first.len(), 2);
+        assert_eq!(p.clip(first[0]).unwrap().start, s(1.0));
+        assert_eq!(p.tracks.len(), 2);
+        // Lanes in use: new lanes are created, video on top, audio at the bottom.
+        let second = p.place_media_at(av, s(0.0)).unwrap();
+        assert_eq!(p.tracks.len(), 4);
+        assert_eq!(p.locate(second[0]).unwrap().0, 1);
+        assert_eq!(p.locate(second[1]).unwrap().0, 3);
+        assert_eq!(p.place_media_at(still, s(0.0)).unwrap().len(), 1);
+        assert_eq!(p.lanes_of(TrackKind::Video).len(), 3);
+        // An emptied lane is reused.
+        let a1 = p.tracks[p.locate(first[1]).unwrap().0].id;
+        p.remove_clips(&first, false).unwrap();
+        let t = p.place_media_at(tone, s(0.0)).unwrap();
+        assert_eq!(p.tracks[p.locate(t[0]).unwrap().0].id, a1);
+        assert!(p.place_media_at(MediaId::new(), s(0.0)).is_err());
     }
 
     #[test]

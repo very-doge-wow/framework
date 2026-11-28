@@ -953,7 +953,8 @@ impl FrameworkApp {
                 self.state.selected_clips.clear();
             }
         }
-        if response.hovered() {
+        // Anywhere over the timeline, also over clips and lane headers.
+        if ui.rect_contains_pointer(rect) {
             // Cmd/Ctrl + wheel and pinch arrive as zoom_delta.
             let (scroll, zoom, pointer) =
                 ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta(), i.pointer.hover_pos()));
@@ -2310,12 +2311,13 @@ mod tests {
     fn media_pool_add_to_timeline_button() {
         let (ctx, mut app) = app_with_project();
         app.state.selected_media = Some(app.state.project.media[0].id);
-        let before = app.state.project.tracks[0].clips.len();
+        let lanes = app.state.project.tracks.len();
         frame(&mut app, &ctx, vec![]);
         assert!(app.state.append_selected_media().is_some());
         app.touch();
         frame(&mut app, &ctx, vec![]);
-        assert_eq!(app.state.project.tracks[0].clips.len(), before + 1);
+        // V1 and A1 are in use: the video and its audio get new lanes.
+        assert_eq!(app.state.project.tracks.len(), lanes + 2);
     }
 
     fn press(app: &mut FrameworkApp, ctx: &egui::Context, k: egui::Key) {
@@ -2677,6 +2679,21 @@ mod tests {
         // A grouped clip shows its link icon.
         app.timeline_command(TimelineCommand::Group);
         frame(&mut app, &ctx, vec![]);
+    }
+
+    #[test]
+    fn zoom_works_over_clips() {
+        let (ctx, mut app) = app_with_project();
+        frame(&mut app, &ctx, vec![]);
+        let over = rect_of(&app, image_clip(&app)).center();
+        let zoom = app.state.zoom;
+        frame(&mut app, &ctx, vec![Event::PointerMoved(over)]);
+        frame(
+            &mut app,
+            &ctx,
+            vec![Event::PointerMoved(over), Event::Zoom(2.0)],
+        );
+        assert!(app.state.zoom > zoom);
     }
 
     #[test]

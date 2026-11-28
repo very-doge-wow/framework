@@ -120,11 +120,12 @@ impl EditorState {
         imported
     }
 
-    /// Appends the selected media to the end of the timeline; video with
-    /// audio goes onto a video and an audio lane, grouped.
+    /// Places the selected media at the playhead on the first empty lane of
+    /// its kind; video with audio also gets an empty audio lane, grouped.
     pub fn append_selected_media(&mut self) -> Option<ClipId> {
         let id = self.selected_media?;
-        let clips = self.edit("Added clip to timeline", |p| p.place_media(id))?;
+        let at = self.playhead;
+        let clips = self.edit("Added clip to timeline", |p| p.place_media_at(id, at))?;
         self.selected_clips = clips.clone();
         clips.first().copied()
     }
