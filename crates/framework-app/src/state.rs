@@ -142,6 +142,7 @@ impl EditorState {
                 if self.project != before {
                     self.push_undo(before);
                     self.status = label.into();
+                    self.prune_selection();
                 }
                 Some(r)
             }
@@ -214,9 +215,14 @@ impl EditorState {
         true
     }
 
-    fn after_history_step(&mut self, label: &str) {
+    /// Drops selected clips that no longer exist.
+    fn prune_selection(&mut self) {
         let project = &self.project;
         self.selected_clips.retain(|c| project.clip(*c).is_some());
+    }
+
+    fn after_history_step(&mut self, label: &str) {
+        self.prune_selection();
         self.dirty = true;
         self.status = label.into();
     }
@@ -765,6 +771,15 @@ mod tests {
             st.project.clip(b).unwrap().duration,
             Time::from_seconds(2.0)
         );
+        // Deleting the lane of the selection deselects, so edits apply again.
+        let v1 = st.project.tracks[0].id;
+        let v2 = st.add_lane(TrackKind::Video).unwrap();
+        st.project.move_clips(&[b], Time::ZERO, 1).unwrap();
+        assert!(st.remove_lane(v1));
+        assert!(st.selected_clips.is_empty());
+        st.set_playhead(Time::from_seconds(4.0));
+        assert!(st.split_at_playhead());
+        assert_eq!(st.project.track(v2).unwrap().clips.len(), 2);
     }
 
     #[test]
