@@ -320,7 +320,7 @@ impl EditorState {
     pub fn delete_selection(&mut self, ripple: bool) -> bool {
         let ids = std::mem::take(&mut self.selected_clips);
         let label = if ripple { "Ripple delete" } else { "Deleted" };
-        self.edit(label, |p| match p.remove_clips(&ids, ripple) {
+        self.edit(label, |p| match p.remove_clips(&ids, ripple)? {
             0 => Err(ProjectError::InvalidEdit("nothing selected")),
             _ => Ok(()),
         })

@@ -202,11 +202,14 @@ impl Project {
     }
 
     /// Deletes clips and everything grouped with them. With `ripple`, later
-    /// clips on the same lanes move left to close the gaps. Returns the number
-    /// of removed clips.
-    pub fn remove_clips(&mut self, ids: &[ClipId], ripple: bool) -> usize {
+    /// clips on the same lanes move left to close the gaps; this fails without
+    /// changes if it would move grouped clips by different amounts. Returns
+    /// the number of removed clips.
+    pub fn remove_clips(&mut self, ids: &[ClipId], ripple: bool) -> Result<usize, ProjectError> {
         let all = self.with_groups(ids);
+        let backup = self.tracks.clone();
         let mut removed = 0;
+        let mut shifts: HashMap<GroupId, Time> = HashMap::new();
         for track in &mut self.tracks {
             let gaps: Vec<(Time, Time)> = track
                 .clips
@@ -216,17 +219,26 @@ impl Project {
                 .collect();
             track.clips.retain(|c| !all.contains(&c.id));
             removed += gaps.len();
-            if ripple {
-                for clip in &mut track.clips {
-                    for (end, len) in &gaps {
-                        if *end <= clip.start {
-                            clip.start -= *len;
-                        }
-                    }
+            if !ripple {
+                continue;
+            }
+            for clip in &mut track.clips {
+                let shift = gaps
+                    .iter()
+                    .filter(|(end, _)| *end <= clip.start)
+                    .fold(Time::ZERO, |sum, (_, len)| sum + *len);
+                clip.start -= shift;
+                if let Some(group) = clip.group
+                    && *shifts.entry(group).or_insert(shift) != shift
+                {
+                    self.tracks = backup;
+                    return Err(ProjectError::InvalidEdit(
+                        "ripple delete would move linked clips out of sync",
+                    ));
                 }
             }
         }
-        removed
+        Ok(removed)
     }
 
     /// Inserts an empty lane at `index` in [`Project::tracks`].
@@ -382,7 +394,7 @@ mod tests {
         assert_eq!(p.trim_start(a, s(9.0), min).unwrap(), s(3.5));
         // End stops at the next clip, then at the end of the source.
         assert_eq!(p.trim_end(a, s(7.0), min).unwrap(), s(6.0));
-        p.remove_clips(&[b], false);
+        p.remove_clips(&[b], false).unwrap();
         assert_eq!(p.trim_end(a, s(20.0), min).unwrap(), s(8.0));
         assert_eq!(p.trim_end(a, s(0.0), min).unwrap(), s(4.0));
         // Images extend freely; the left edge stops at the previous clip.
@@ -429,10 +441,30 @@ mod tests {
     fn remove_with_and_without_ripple() {
         let (mut p, a, b) = project();
         let mut q = p.clone();
-        assert_eq!(p.remove_clips(&[a], false), 1);
+        assert_eq!(p.remove_clips(&[a], false).unwrap(), 1);
         assert_eq!(p.clip(b).unwrap().start, s(6.0));
-        assert_eq!(q.remove_clips(&[a], true), 1);
+        assert_eq!(q.remove_clips(&[a], true).unwrap(), 1);
         assert_eq!(q.clip(b).unwrap().start, s(2.0));
+        // Several gaps before a clip all close.
+        let (mut r, a, b) = project();
+        let image = r.clip(b).unwrap().media;
+        let v1 = r.tracks[0].id;
+        let c = r
+            .add_clip(v1, Clip::new(image, s(9.0), s(0.0), s(1.0)))
+            .unwrap();
+        assert_eq!(r.remove_clips(&[a, b], true).unwrap(), 2);
+        assert_eq!(r.clip(c).unwrap().start, s(3.0));
+        // Linked clips on a lane without the gap would drift: refused.
+        let (mut r, a, b) = project();
+        let video = r.clip(a).unwrap().media;
+        let a1 = r.tracks[1].id;
+        let d = r
+            .add_clip(a1, Clip::new(video, s(6.0), s(0.0), s(2.0)))
+            .unwrap();
+        r.group_clips(&[b, d]).unwrap();
+        let before = r.clone();
+        assert!(r.remove_clips(&[a], true).is_err());
+        assert_eq!(r, before);
     }
 
     #[test]
