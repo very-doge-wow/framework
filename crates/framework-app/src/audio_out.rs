@@ -192,8 +192,14 @@ impl AudioOutput {
         let engine = Arc::new(AudioEngine::new(config.sample_rate));
         let stream = match supported.sample_format() {
             cpal::SampleFormat::F32 => build::<f32>(&device, &config, engine.clone()),
+            cpal::SampleFormat::F64 => build::<f64>(&device, &config, engine.clone()),
+            cpal::SampleFormat::I8 => build::<i8>(&device, &config, engine.clone()),
             cpal::SampleFormat::I16 => build::<i16>(&device, &config, engine.clone()),
+            cpal::SampleFormat::I24 => build::<cpal::I24>(&device, &config, engine.clone()),
+            cpal::SampleFormat::I32 => build::<i32>(&device, &config, engine.clone()),
+            cpal::SampleFormat::U8 => build::<u8>(&device, &config, engine.clone()),
             cpal::SampleFormat::U16 => build::<u16>(&device, &config, engine.clone()),
+            cpal::SampleFormat::U32 => build::<u32>(&device, &config, engine.clone()),
             _ => None,
         }?;
         stream.play().ok()?;
