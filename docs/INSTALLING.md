@@ -20,14 +20,20 @@ With the [GitHub CLI](https://cli.github.com) you can instead run
 ## macOS (Apple silicon)
 
 ```sh
-url=$(curl -fsSL https://api.github.com/repos/very-doge-wow/framework/releases/latest \
-  | grep -o '"browser_download_url": *"[^"]*macos-arm64\.zip"' | cut -d'"' -f4)
-curl -fL "$url" -o /tmp/framework.zip
-rm -rf /tmp/framework && ditto -x -k /tmp/framework.zip /tmp/framework
-rm -rf /Applications/Framework.app
-mv /tmp/framework/framework-*/Framework.app /Applications/
-open /Applications/Framework.app
+( set -e
+  url=$(curl -fsSL https://api.github.com/repos/very-doge-wow/framework/releases/latest \
+    | grep -o '"browser_download_url": *"[^"]*macos-arm64\.zip"' | cut -d'"' -f4)
+  tmp=$(mktemp -d)
+  curl -fL "$url" -o "$tmp/framework.zip"
+  ditto -x -k "$tmp/framework.zip" "$tmp/x"
+  rm -rf /Applications/Framework.app
+  mv "$tmp"/x/framework-*/Framework.app /Applications/
+  rm -rf "$tmp"
+  open /Applications/Framework.app )
 ```
+
+The commands run in a subshell with `set -e`, so a failed download stops
+before anything is installed, and they use a private temporary directory.
 
 The app is ad-hoc signed, not notarised. If you downloaded it with a browser
 instead, macOS quarantines it; allow it once with
