@@ -73,6 +73,7 @@ pub struct FrameworkApp {
     /// Width of the timeline's time area in the last frame, for zoom steps and fitting.
     timeline_width: f32,
     drag: Option<ClipDrag>,
+    marquee: Option<Marquee>,
     pub snapping: bool,
     /// On-screen clip and lane-header rectangles of the last frame.
     pub clip_rects: Vec<(ClipId, Rect)>,
@@ -114,6 +115,7 @@ impl FrameworkApp {
             actions: Vec::new(),
             timeline_width: 0.0,
             drag: None,
+            marquee: None,
             snapping: true,
             clip_rects: Vec::new(),
             lane_rects: Vec::new(),
@@ -900,12 +902,54 @@ impl FrameworkApp {
     fn timeline_input(&mut self, ui: &egui::Ui, rect: Rect, response: &egui::Response) {
         let origin = rect.left() + HEADER_WIDTH;
         self.timeline_width = (rect.right() - origin).max(0.0);
-        if let Some(pos) = response.interact_pointer_pos()
+        let in_lanes = |p: Pos2| p.x >= origin && p.y > rect.top() + RULER_HEIGHT;
+        let (press, modifiers, down) = ui.input(|i| {
+            (
+                i.pointer.press_origin(),
+                i.modifiers,
+                i.pointer.primary_down(),
+            )
+        });
+        if !down {
+            self.marquee = None;
+        }
+        // Dragging across empty lane space draws a selection box.
+        if response.drag_started()
+            && let Some(p) = press.filter(|p| in_lanes(*p))
+        {
+            let additive = modifiers.shift || modifiers.command;
+            self.marquee = Some(Marquee {
+                origin: p,
+                current: p,
+                base: if additive {
+                    self.state.selected_clips.clone()
+                } else {
+                    Vec::new()
+                },
+            });
+        }
+        if let Some(m) = &mut self.marquee {
+            if let Some(pos) = response.interact_pointer_pos() {
+                m.current = pos;
+            }
+            let area = Rect::from_two_pos(m.origin, m.current);
+            let mut selection = m.base.clone();
+            for (id, r) in &self.clip_rects {
+                if r.intersects(area) && !selection.contains(id) {
+                    selection.push(*id);
+                }
+            }
+            self.state.selected_clips = selection;
+        } else if let Some(pos) = response.interact_pointer_pos()
             && pos.x >= origin
         {
-            self.state
-                .set_playhead(self.state.x_to_time(pos.x - origin));
-            if response.clicked() && pos.y > rect.top() + RULER_HEIGHT {
+            // The ruler scrubs; empty lane space moves the playhead on click.
+            if !in_lanes(pos) {
+                self.state
+                    .set_playhead(self.state.x_to_time(pos.x - origin));
+            } else if response.clicked() {
+                self.state
+                    .set_playhead(self.state.x_to_time(pos.x - origin));
                 self.state.selected_clips.clear();
             }
         }
@@ -1322,18 +1366,35 @@ impl FrameworkApp {
                         );
                     }
                 }
-                let mut name = asset.display_name();
+                let clipped = painter.with_clip_rect(r.shrink(2.0));
+                let mut text_x = 8.0;
                 if clip.group.is_some() {
-                    name = format!("⛓ {name}");
+                    paint_link(
+                        &clipped,
+                        r.left_center() + Vec2::new(8.0, 0.0),
+                        Color32::WHITE,
+                    );
+                    text_x = 24.0;
                 }
-                painter.with_clip_rect(r.shrink(2.0)).text(
-                    r.left_center() + Vec2::new(8.0, 0.0),
+                clipped.text(
+                    r.left_center() + Vec2::new(text_x, 0.0),
                     Align2::LEFT_CENTER,
-                    name,
+                    asset.display_name(),
                     font.clone(),
                     Color32::WHITE,
                 );
             }
+        }
+
+        if let Some(m) = &self.marquee {
+            let area = Rect::from_two_pos(m.origin, m.current);
+            painter.rect_filled(area, 2.0, theme::ACCENT.gamma_multiply(0.15));
+            painter.rect_stroke(
+                area,
+                2.0,
+                Stroke::new(1.0, theme::ACCENT),
+                StrokeKind::Inside,
+            );
         }
 
         // Playhead.
@@ -1597,6 +1658,23 @@ struct ClipDrag {
     kind: DragKind,
     clip: ClipId,
     origin: Pos2,
+}
+
+/// Box selection in the timeline; `base` is kept when Shift/Cmd was held.
+#[derive(Debug, Clone)]
+struct Marquee {
+    origin: Pos2,
+    current: Pos2,
+    base: Vec<ClipId>,
+}
+
+/// Two interlocking chain links marking a grouped clip.
+fn paint_link(painter: &egui::Painter, left_center: Pos2, color: Color32) {
+    let stroke = Stroke::new(1.5, color);
+    for (dx, dy) in [(0.0, -1.5), (5.0, 1.5)] {
+        let r = Rect::from_min_size(left_center + Vec2::new(dx, dy - 2.5), Vec2::new(8.0, 5.0));
+        painter.rect_stroke(r, 2.5, stroke, StrokeKind::Middle);
+    }
 }
 
 /// Timeline edits triggered by shortcuts, toolbar buttons and context menus.
@@ -2562,6 +2640,43 @@ mod tests {
             &ctx,
             vec![Event::PointerMoved(pos2(r.left() + 1.0, r.center().y))],
         );
+    }
+
+    #[test]
+    fn box_selection_selects_touched_clips() {
+        let (ctx, mut app) = app_with_project();
+        frame(&mut app, &ctx, vec![]);
+        let video = app.state.project.tracks[0].clips[0].id;
+        let image = image_clip(&app);
+        let audio = app.state.project.tracks[1].clips[0].id;
+        let (v, i) = (rect_of(&app, video), rect_of(&app, image));
+        let playhead = app.state.playhead;
+        // From empty space right of the V1 clips back across both of them.
+        let from = pos2(i.right() + 40.0, i.top() + 2.0);
+        drag(&mut app, &ctx, from, pos2(v.center().x, v.bottom() - 2.0));
+        assert_eq!(app.state.selected_clips.len(), 2);
+        assert!(
+            app.state.selected_clips.contains(&video) && app.state.selected_clips.contains(&image)
+        );
+        assert_eq!(app.state.playhead, playhead);
+        // Shift adds to the selection.
+        let a = rect_of(&app, audio);
+        let from = pos2(a.right() + 40.0, a.center().y);
+        frame(
+            &mut app,
+            &ctx,
+            vec![Event::ModifiersChanged(Modifiers::SHIFT)],
+        );
+        drag(&mut app, &ctx, from, a.center());
+        frame(
+            &mut app,
+            &ctx,
+            vec![Event::ModifiersChanged(Modifiers::NONE)],
+        );
+        assert_eq!(app.state.selected_clips.len(), 3);
+        // A grouped clip shows its link icon.
+        app.timeline_command(TimelineCommand::Group);
+        frame(&mut app, &ctx, vec![]);
     }
 
     #[test]
