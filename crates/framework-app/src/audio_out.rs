@@ -22,6 +22,8 @@ struct Inner {
     buffer: VecDeque<f32>,
     error: Option<String>,
     quit: bool,
+    /// The mixer thread is waiting without any open media files.
+    idle: bool,
 }
 
 struct Shared {
@@ -51,12 +53,18 @@ impl AudioEngine {
                 let (project, generation, pos) = {
                     let mut g = worker.inner.lock().expect("audio lock");
                     while !g.quit && (g.project.is_none() || g.buffer.len() >= ahead) {
+                        if g.project.is_none() && !g.idle {
+                            mixer.release();
+                            g.idle = true;
+                            worker.wake.notify_all();
+                        }
                         g = worker.wake.wait(g).expect("audio lock");
                     }
                     if g.quit {
                         return;
                     }
                     let project = g.project.clone().expect("checked above");
+                    g.idle = false;
                     (project, g.generation, g.start + g.produced)
                 };
                 chunk.fill(0.0);
@@ -110,6 +118,16 @@ impl AudioEngine {
 
     pub fn stop(&self) {
         self.update(|g| g.project = None);
+    }
+
+    /// Stops and waits until the mixer has closed its media files, e.g.
+    /// before the project file that embeds them is replaced.
+    pub fn release(&self) {
+        self.stop();
+        let mut g = self.shared.inner.lock().expect("audio lock");
+        while !g.idle && !g.quit {
+            g = self.shared.wake.wait(g).expect("audio lock");
+        }
     }
 
     /// Timeline time of the sample the device is playing, while playing.
@@ -264,6 +282,18 @@ mod tests {
         engine.stop();
         assert_eq!(engine.position(), None);
         assert_eq!(engine.take_error(), None);
+    }
+
+    #[test]
+    fn release_waits_until_media_is_closed() {
+        let p = project_with_tone();
+        let engine = AudioEngine::new(8000);
+        engine.release();
+        engine.play(&p, Time::ZERO);
+        pull_until_audible(&engine, 2);
+        engine.release();
+        assert_eq!(engine.position(), None);
+        assert!(engine.shared.inner.lock().unwrap().idle);
     }
 
     #[test]

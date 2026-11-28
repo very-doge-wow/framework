@@ -250,6 +250,11 @@ impl AudioMixer {
         self.rate
     }
 
+    /// Closes all open media files.
+    pub fn release(&mut self) {
+        self.readers.clear();
+    }
+
     /// Mixes all audible clips into `out` (interleaved stereo) starting at timeline sample `s0`.
     pub fn mix(&mut self, project: &Project, s0: i64, out: &mut [f32]) -> Result<(), MediaError> {
         let n = (out.len() / OUTPUT_CHANNELS) as i64;

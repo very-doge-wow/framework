@@ -442,8 +442,12 @@ impl FrameworkApp {
     /// Saves the project; the preview first closes its media files because
     /// embedded media may live in the file being replaced.
     pub fn save_project(&mut self, path: &std::path::Path, mode: SaveMode) {
+        self.transport_action(Transport::pause);
         if let Some(worker) = &self.preview {
             worker.release_media();
+        }
+        if let Some(audio) = &self.audio {
+            audio.release();
         }
         self.state.save_to(path, mode);
         self.preview_requested = None;
