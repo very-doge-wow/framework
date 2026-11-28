@@ -324,7 +324,7 @@ impl EditorState {
 
     /// Deletes the selected clips; `ripple` closes the gaps.
     pub fn delete_selection(&mut self, ripple: bool) -> bool {
-        let ids = std::mem::take(&mut self.selected_clips);
+        let ids = self.selected_clips.clone();
         let label = if ripple { "Ripple delete" } else { "Deleted" };
         self.edit(label, |p| match p.remove_clips(&ids, ripple)? {
             0 => Err(ProjectError::InvalidEdit("nothing selected")),
@@ -780,6 +780,32 @@ mod tests {
         st.set_playhead(Time::from_seconds(4.0));
         assert!(st.split_at_playhead());
         assert_eq!(st.project.track(v2).unwrap().clips.len(), 2);
+    }
+
+    #[test]
+    fn refused_ripple_delete_keeps_the_selection() {
+        use framework_core::Clip;
+        let (mut st, a, b) = editable();
+        let media = st.project.clip(b).unwrap().media;
+        let v2 = st.add_lane(TrackKind::Video).unwrap();
+        let c = st
+            .project
+            .add_clip(
+                v2,
+                Clip::new(
+                    media,
+                    Time::from_seconds(3.0),
+                    Time::ZERO,
+                    Time::from_seconds(1.0),
+                ),
+            )
+            .unwrap();
+        st.project.group_clips(&[b, c]).unwrap();
+        st.selected_clips = vec![a];
+        assert!(!st.delete_selection(true));
+        assert_eq!(st.selected_clips, vec![a]);
+        assert!(st.delete_selection(false));
+        assert!(st.selected_clips.is_empty());
     }
 
     #[test]
