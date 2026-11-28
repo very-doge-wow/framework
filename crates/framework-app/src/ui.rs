@@ -991,15 +991,20 @@ impl FrameworkApp {
             .collect()
     }
 
-    /// Visible part of a clip in a lane, `None` when scrolled out of view.
+    /// Visible part of a clip in a lane, `None` when scrolled out of view
+    /// (horizontally, or below a timeline too short for all lanes).
     fn clip_rect(&self, rect: Rect, lane: Rect, clip: &framework_core::Clip) -> Option<Rect> {
         let origin = rect.left() + HEADER_WIDTH;
         let x0 = origin + self.state.time_to_x(clip.start);
         let x1 = origin + self.state.time_to_x(clip.end());
-        (x1 >= origin && x0 <= rect.right()).then(|| {
+        let (top, bottom) = (
+            lane.top() + 3.0,
+            (lane.top() + TRACK_HEIGHT - 5.0).min(rect.bottom()),
+        );
+        (x1 >= origin && x0 <= rect.right() && top < bottom).then(|| {
             Rect::from_min_max(
-                Pos2::new(x0.max(origin), lane.top() + 3.0),
-                Pos2::new(x1.min(rect.right()), lane.top() + TRACK_HEIGHT - 5.0),
+                Pos2::new(x0.max(origin), top),
+                Pos2::new(x1.min(rect.right()), bottom),
             )
         })
     }
@@ -2713,6 +2718,22 @@ mod tests {
         // A grouped clip shows its link icon.
         app.timeline_command(TimelineCommand::Group);
         frame(&mut app, &ctx, vec![]);
+    }
+
+    #[test]
+    fn lanes_below_the_timeline_are_not_interactive() {
+        let (ctx, mut app) = app_with_project();
+        frame(&mut app, &ctx, vec![]);
+        for _ in 0..30 {
+            app.timeline_command(TimelineCommand::AddLane(TrackKind::Audio));
+        }
+        let media = app.state.project.media[2].id;
+        let last = app.state.project.tracks.last().unwrap().id;
+        let clip =
+            framework_core::Clip::new(media, Time::ZERO, Time::ZERO, Time::from_seconds(0.5));
+        let id = app.state.project.add_clip(last, clip).unwrap();
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.clip_rects.iter().all(|(c, _)| *c != id));
     }
 
     #[test]
