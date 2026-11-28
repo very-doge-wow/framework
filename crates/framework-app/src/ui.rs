@@ -297,7 +297,9 @@ impl FrameworkApp {
             let interval = self
                 .preview_quality
                 .frame_interval(self.state.project.settings.frame_rate);
-            if (self.state.playhead.flicks() - t.flicks()).abs() < interval.flicks() {
+            // At shuttle speeds the playhead covers `speed` timeline seconds per second.
+            let interval = interval.flicks() as f64 * self.transport.speed.abs().max(1.0);
+            if ((self.state.playhead.flicks() - t.flicks()).abs() as f64) < interval {
                 return;
             }
         }
